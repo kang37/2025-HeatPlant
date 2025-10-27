@@ -798,10 +798,10 @@ ccm_results_basic <- ccm_results_all %>%
   select(-ccm_summary_data, -ccm_raw_data, -correlation_data, 
          -ccm_plot, -cor_plot)
 
-write_csv(ccm_results_basic, "data_proc/ccm_results_tp1.csv")
+# write_csv(ccm_results_basic, "data_proc/ccm_results_tp1.csv")
 
 # 保存完整结果（包含图表）
-saveRDS(ccm_results_all, "data_proc/ccm_results_tp1_full.rds")
+# saveRDS(ccm_results_all, "data_proc/ccm_results_tp1_full.rds")
 
 # ============================================================================
 # 3. 结果统计和分类
