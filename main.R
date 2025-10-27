@@ -78,11 +78,11 @@ meteo_data_summer <- meteo_data %>%
   group_by(meteo_stat_id, month) %>%
   mutate(
     # 计算该站点该月份的90%分位数（历史阈值）
-    temp_q90 = quantile(tavg, 0.9, na.rm = TRUE),
+    temp_q90 = quantile(tmax, 0.9, na.rm = TRUE),
     # 计算温度异常（所有月份都计算）
-    temp_anomaly = tavg - temp_q90,
+    temp_anomaly = tmax - temp_q90,
     # 标记是否为热月
-    is_hot_month = tavg > temp_q90
+    is_hot_month = tmax > temp_q90
   ) %>%
   ungroup() %>%
   arrange(meteo_stat_id, year, month)
