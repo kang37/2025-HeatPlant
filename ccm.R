@@ -523,8 +523,13 @@ if (nrow(best_lag) > 0) {
 
 cat("\n", rep("=", 70), "\n", sep = "")
 
-# All stations ----
+# ============================================================================
+# 批量分析所有站点：Tp=1滞后因果分析（增强版）
+# ============================================================================
 
+library(rEDM)
+library(tidyverse)
+library(patchwork)
 
 # ============================================================================
 # 1. 增强的CCM分析函数（包含相关性检验）
@@ -621,10 +626,8 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
       rename(lib_size = LibSize) %>%
       group_by(lib_size) %>%
       summarise(
-        # temp_anomaly:sif = 用temp预测t+1的sif → temp影响sif
         rho_temp_to_sif_mean = mean(`temp_anomaly:sif`, na.rm = TRUE),
         rho_temp_to_sif_sd = sd(`temp_anomaly:sif`, na.rm = TRUE),
-        # sif:temp_anomaly = 用sif预测t+1的temp → sif影响temp
         rho_sif_to_temp_mean = mean(`sif:temp_anomaly`, na.rm = TRUE),
         rho_sif_to_temp_sd = sd(`sif:temp_anomaly`, na.rm = TRUE),
         .groups = "drop"
@@ -641,7 +644,6 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
                              ccm_summary$rho_sif_to_temp_mean)
     
     # ===== 相关性分析 =====
-    # 滞后1月的相关性：t月温度 vs t+1月SIF
     cor_result <- cor.test(station_data_with_lag$temp_anomaly, 
                            station_data_with_lag$sif_lag1)
     
@@ -649,7 +651,6 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
     correlation_p <- cor_result$p.value
     
     # ===== 判断因果关系 =====
-    # CCM阈值
     ccm_threshold_rho <- 0.1
     ccm_threshold_trend <- 0
     
@@ -740,20 +741,16 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
       E = E_ccm,
       best_E_temp = best_E_temp,
       best_E_sif = best_E_sif,
-      # CCM结果
       rho_temp_to_sif = final_rho_temp_to_sif,
       trend_temp_to_sif = trend_temp_to_sif,
       rho_sif_to_temp = final_rho_sif_to_temp,
       trend_sif_to_temp = trend_sif_to_temp,
-      # 因果判断
       temp_causes_sif = temp_causes_sif,
       sif_causes_temp = sif_causes_temp,
       causality_type = causality_type,
-      # 相关性结果
       correlation_r = correlation_r,
       correlation_p = correlation_p,
       effect_direction = effect_direction,
-      # 嵌套列：保存数据和图表
       ccm_summary_data = list(ccm_summary),
       ccm_raw_data = list(ccm_result),
       correlation_data = list(station_data_with_lag),
@@ -780,28 +777,15 @@ all_stations <- data_for_ccm %>%
 cat("\n准备分析", length(all_stations), "个站点...\n")
 cat("分析内容: Tp=1 (t月温度 → t+1月SIF)\n\n")
 
-pb <- progress_bar$new(
-  format = "  CCM分析 [:bar] :percent eta: :eta",
-  total = length(all_stations), 
-  clear = FALSE
-)
-
-ccm_results_all <- map_dfr(all_stations, function(sid) {
-  pb$tick()
-  perform_ccm_with_correlation(sid, data_for_ccm, min_points = 30)
+# 简单进度显示（不使用progress包）
+ccm_results_all <- map_dfr(seq_along(all_stations), function(i) {
+  if (i %% 50 == 0) {
+    cat("已完成:", i, "/", length(all_stations), "\n")
+  }
+  perform_ccm_with_correlation(all_stations[i], data_for_ccm, min_points = 30)
 })
 
 cat("\n成功分析的站点数:", nrow(ccm_results_all), "/", length(all_stations), "\n")
-
-# 保存基本结果
-ccm_results_basic <- ccm_results_all %>%
-  select(-ccm_summary_data, -ccm_raw_data, -correlation_data, 
-         -ccm_plot, -cor_plot)
-
-# write_csv(ccm_results_basic, "data_proc/ccm_results_tp1.csv")
-
-# 保存完整结果（包含图表）
-# saveRDS(ccm_results_all, "data_proc/ccm_results_tp1_full.rds")
 
 # ============================================================================
 # 3. 结果统计和分类
@@ -809,14 +793,12 @@ ccm_results_basic <- ccm_results_all %>%
 
 cat("\n=== CCM分析结果统计 ===\n\n")
 
-# 因果类型统计
 causality_stats <- table(ccm_results_all$causality_type)
 print(causality_stats)
 
 cat("\n各因果类型占比:\n")
 print(round(prop.table(causality_stats) * 100, 1))
 
-# 效应方向统计（在有因果关系的站点中）
 effect_stats <- ccm_results_all %>%
   filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
   count(effect_direction) %>%
@@ -825,7 +807,6 @@ effect_stats <- ccm_results_all %>%
 cat("\n温度→SIF的效应方向统计:\n")
 print(effect_stats)
 
-# 详细统计
 detailed_stats <- ccm_results_all %>%
   mutate(
     has_temp_to_sif = causality_type %in% c("Temp → SIF", "双向因果"),
@@ -849,307 +830,24 @@ cat("  其中负向影响:", detailed_stats$n_negative_effect,
 cat("  其中正向影响:", detailed_stats$n_positive_effect, "\n\n")
 
 # ============================================================================
-# 4. 为不同因果类型创建示例图集
-# ============================================================================
-
-cat("=== 生成各类因果关系的示例图 ===\n")
-
-# 创建输出目录
-dir.create("data_proc/ccm_examples", showWarnings = FALSE, recursive = TRUE)
-
-# 4.1 温度→SIF（负向影响）- 最符合预期
-temp_to_sif_negative <- ccm_results_all %>%
-  filter(
-    causality_type %in% c("Temp → SIF", "双向因果"),
-    correlation_r < 0,
-    correlation_p < 0.05
-  ) %>%
-  arrange(desc(rho_temp_to_sif), correlation_r) %>%
-  head(6)
-
-library(patchwork)
-if (nrow(temp_to_sif_negative) > 0) {
-  cat("\n生成 '温度→SIF(负向)' 示例图...\n")
-  
-  # CCM图集
-  ccm_plots <- map(1:min(6, nrow(temp_to_sif_negative)), function(i) {
-    temp_to_sif_negative$ccm_plot[[i]]
-  })
-  
-  combined_ccm <- wrap_plots(ccm_plots, ncol = 3) +
-    plot_annotation(
-      title = "温度→SIF 因果关系（负向影响）- CCM分析",
-      subtitle = paste("最符合研究预期的", 
-                       min(6, nrow(temp_to_sif_negative)), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/temp_to_sif_negative_ccm.png",
-         combined_ccm, width = 15, height = 10, dpi = 300)
-  
-  # 相关性图集
-  cor_plots <- map(1:min(6, nrow(temp_to_sif_negative)), function(i) {
-    temp_to_sif_negative$cor_plot[[i]]
-  })
-  
-  combined_cor <- wrap_plots(cor_plots, ncol = 3) +
-    plot_annotation(
-      title = "温度→SIF 因果关系（负向影响）- 相关性分析",
-      subtitle = paste("最符合研究预期的", 
-                       min(6, nrow(temp_to_sif_negative)), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/temp_to_sif_negative_cor.png",
-         combined_cor, width = 15, height = 10, dpi = 300)
-  
-  cat("✓ 已保存:", nrow(temp_to_sif_negative), "个站点\n")
-}
-
-# 4.2 温度→SIF（正向影响）- 不符合预期
-temp_to_sif_positive <- ccm_results_all %>%
-  filter(
-    causality_type %in% c("Temp → SIF", "双向因果"),
-    correlation_r > 0,
-    correlation_p < 0.05
-  ) %>%
-  arrange(desc(rho_temp_to_sif), desc(correlation_r)) %>%
-  head(6)
-
-if (nrow(temp_to_sif_positive) > 0) {
-  cat("\n生成 '温度→SIF(正向)' 示例图...\n")
-  
-  ccm_plots <- map(1:min(6, nrow(temp_to_sif_positive)), function(i) {
-    temp_to_sif_positive$ccm_plot[[i]]
-  })
-  
-  combined_ccm <- wrap_plots(ccm_plots, ncol = 3) +
-    plot_annotation(
-      title = "温度→SIF 因果关系（正向影响）- CCM分析",
-      subtitle = paste("不符合预期的", 
-                       min(6, nrow(temp_to_sif_positive)), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/temp_to_sif_positive_ccm.png",
-         combined_ccm, width = 15, height = 10, dpi = 300)
-  
-  cor_plots <- map(1:min(6, nrow(temp_to_sif_positive)), function(i) {
-    temp_to_sif_positive$cor_plot[[i]]
-  })
-  
-  combined_cor <- wrap_plots(cor_plots, ncol = 3) +
-    plot_annotation(
-      title = "温度→SIF 因果关系（正向影响）- 相关性分析",
-      subtitle = paste("不符合预期的", 
-                       min(6, nrow(temp_to_sif_positive)), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/temp_to_sif_positive_cor.png",
-         combined_cor, width = 15, height = 10, dpi = 300)
-  
-  cat("✓ 已保存:", nrow(temp_to_sif_positive), "个站点\n")
-}
-
-# 4.3 双向因果
-bidirectional <- ccm_results_all %>%
-  filter(causality_type == "双向因果") %>%
-  arrange(desc(rho_temp_to_sif + rho_sif_to_temp)) %>%
-  head(6)
-
-if (nrow(bidirectional) > 0) {
-  cat("\n生成 '双向因果' 示例图...\n")
-  
-  ccm_plots <- map(1:min(6, nrow(bidirectional)), function(i) {
-    bidirectional$ccm_plot[[i]]
-  })
-  
-  combined_ccm <- wrap_plots(ccm_plots, ncol = 3) +
-    plot_annotation(
-      title = "双向因果关系 - CCM分析",
-      subtitle = paste("ρ值总和最高的", 
-                       min(6, nrow(bidirectional)), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/bidirectional_ccm.png",
-         combined_ccm, width = 15, height = 10, dpi = 300)
-  
-  cor_plots <- map(1:min(6, nrow(bidirectional)), function(i) {
-    bidirectional$cor_plot[[i]]
-  })
-  
-  combined_cor <- wrap_plots(cor_plots, ncol = 3) +
-    plot_annotation(
-      title = "双向因果关系 - 相关性分析",
-      subtitle = paste("ρ值总和最高的", 
-                       min(6, nrow(bidirectional)), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/bidirectional_cor.png",
-         combined_cor, width = 15, height = 10, dpi = 300)
-  
-  cat("✓ 已保存:", nrow(bidirectional), "个站点\n")
-}
-
-# 4.4 无显著因果
-no_causality <- ccm_results_all %>%
-  filter(causality_type == "无显著因果") %>%
-  slice_sample(n = min(6, n())) %>%
-  head(6)
-
-if (nrow(no_causality) > 0) {
-  cat("\n生成 '无显著因果' 示例图...\n")
-  
-  ccm_plots <- map(1:nrow(no_causality), function(i) {
-    no_causality$ccm_plot[[i]]
-  })
-  
-  combined_ccm <- wrap_plots(ccm_plots, ncol = 3) +
-    plot_annotation(
-      title = "无显著因果关系 - CCM分析",
-      subtitle = paste("随机选择的", nrow(no_causality), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/no_causality_ccm.png",
-         combined_ccm, width = 15, height = 10, dpi = 300)
-  
-  cor_plots <- map(1:nrow(no_causality), function(i) {
-    no_causality$cor_plot[[i]]
-  })
-  
-  combined_cor <- wrap_plots(cor_plots, ncol = 3) +
-    plot_annotation(
-      title = "无显著因果关系 - 相关性分析",
-      subtitle = paste("随机选择的", nrow(no_causality), "个站点"),
-      theme = theme(plot.title = element_text(size = 16, face = "bold"))
-    )
-  
-  ggsave("data_proc/ccm_examples/no_causality_cor.png",
-         combined_cor, width = 15, height = 10, dpi = 300)
-  
-  cat("✓ 已保存:", nrow(no_causality), "个站点\n")
-}
-
-# ============================================================================
-# 5. 创建汇总可视化
-# ============================================================================
-
-cat("\n=== 创建汇总可视化 ===\n")
-
-# 5.1 因果类型分布
-p_causality_dist <- ggplot(ccm_results_all, 
-                           aes(x = causality_type, fill = causality_type)) +
-  geom_bar() +
-  geom_text(stat = "count", aes(label = after_stat(count)), 
-            vjust = -0.5, size = 5) +
-  scale_fill_manual(values = c(
-    "Temp → SIF" = "#377EB8",
-    "SIF → Temp" = "#E41A1C",
-    "双向因果" = "#984EA3",
-    "无显著因果" = "#999999"
-  )) +
-  labs(
-    title = "CCM因果关系类型分布 (Tp=1)",
-    subtitle = paste("总站点数:", nrow(ccm_results_all)),
-    x = "因果类型",
-    y = "站点数"
-  ) +
-  theme_minimal() +
-  theme(
-    legend.position = "none",
-    axis.text.x = element_text(angle = 15, hjust = 1)
-  )
-
-ggsave("data_proc/causality_distribution.png", p_causality_dist,
-       width = 8, height = 6, dpi = 300)
-
-# 5.2 效应方向分布（在有温度→SIF因果的站点中）
-temp_to_sif_results <- ccm_results_all %>%
-  filter(causality_type %in% c("Temp → SIF", "双向因果"))
-
-if (nrow(temp_to_sif_results) > 0) {
-  p_effect_dist <- ggplot(temp_to_sif_results, 
-                          aes(x = effect_direction, fill = effect_direction)) +
-    geom_bar() +
-    geom_text(stat = "count", aes(label = after_stat(count)), 
-              vjust = -0.5, size = 5) +
-    scale_fill_manual(values = c(
-      "负向(温度↑ SIF↓)" = "#E41A1C",
-      "正向(温度↑ SIF↑)" = "#4DAF4A",
-      "不显著" = "#999999"
-    )) +
-    labs(
-      title = "温度→SIF效应方向分布",
-      subtitle = paste("有因果关系的站点数:", nrow(temp_to_sif_results)),
-      x = "效应方向",
-      y = "站点数"
-    ) +
-    theme_minimal() +
-    theme(
-      legend.position = "none",
-      axis.text.x = element_text(angle = 15, hjust = 1)
-    )
-  
-  ggsave("data_proc/effect_direction_distribution.png", p_effect_dist,
-         width = 8, height = 6, dpi = 300)
-}
-
-# 5.3 CCM强度 vs 相关系数散点图
-p_scatter <- ggplot(ccm_results_all, 
-                    aes(x = rho_temp_to_sif, y = correlation_r, 
-                        color = causality_type)) +
-  geom_point(size = 2, alpha = 0.7) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
-  geom_vline(xintercept = 0.1, linetype = "dashed", color = "gray") +
-  scale_color_manual(values = c(
-    "Temp → SIF" = "#377EB8",
-    "SIF → Temp" = "#E41A1C",
-    "双向因果" = "#984EA3",
-    "无显著因果" = "#999999"
-  )) +
-  labs(
-    title = "CCM因果强度 vs 相关系数",
-    subtitle = "温度→SIF的因果性和相关性",
-    x = "CCM因果强度 (ρ)",
-    y = "Pearson相关系数 (r)",
-    color = "因果类型"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "right")
-
-ggsave("data_proc/ccm_vs_correlation.png", p_scatter,
-       width = 10, height = 6, dpi = 300)
-
-
-
-
-# ============================================================================
-# 因果方向 × 相关性质的交叉统计
+# 4. 因果方向 × 相关性质的交叉统计
 # ============================================================================
 
 cat("\n=== 因果方向 × 相关性质 交叉统计 ===\n\n")
 
-# 创建详细的分类
 detailed_classification <- ccm_results_all %>%
   mutate(
-    # 简化的效应方向分类
     effect_type = case_when(
       correlation_p >= 0.05 ~ "无显著相关",
       correlation_r < -0.1 ~ "显著负相关",
       correlation_r > 0.1 ~ "显著正相关",
       TRUE ~ "弱相关"
     ),
-    # 重新排序因果类型
     causality_type = factor(causality_type, 
                             levels = c("Temp → SIF", "SIF → Temp", 
                                        "双向因果", "无显著因果"))
   )
 
-# 1. 创建交叉表
 cross_table <- detailed_classification %>%
   count(causality_type, effect_type) %>%
   pivot_wider(names_from = effect_type, 
@@ -1160,7 +858,6 @@ cross_table <- detailed_classification %>%
 cat("【交叉统计表】\n")
 print(cross_table)
 
-# 2. 计算百分比
 cross_table_pct <- detailed_classification %>%
   count(causality_type, effect_type) %>%
   group_by(causality_type) %>%
@@ -1177,7 +874,6 @@ cross_table_pct <- detailed_classification %>%
 cat("\n【交叉统计表（含百分比）】\n")
 print(cross_table_pct)
 
-# 3. 详细的数量统计
 cat("\n【详细统计】\n\n")
 
 for (cause_type in c("Temp → SIF", "SIF → Temp", "双向因果", "无显著因果")) {
@@ -1190,7 +886,6 @@ for (cause_type in c("Temp → SIF", "SIF → Temp", "双向因果", "无显著�
   cat("★", cause_type, "★\n")
   cat("总数:", nrow(subset_data), "个站点\n")
   
-  # 统计各种相关性
   stats <- subset_data %>%
     summarise(
       n_neg_sig = sum(correlation_r < 0 & correlation_p < 0.05),
@@ -1218,59 +913,95 @@ for (cause_type in c("Temp → SIF", "SIF → Temp", "双向因果", "无显著�
   cat("\n")
 }
 
-# 4. 创建可视化热图
-p_heatmap <- detailed_classification %>%
-  count(causality_type, effect_type) %>%
-  ggplot(aes(x = effect_type, y = causality_type, fill = n)) +
-  geom_tile(color = "white", linewidth = 1) +
-  geom_text(aes(label = n), color = "white", size = 6, fontface = "bold") +
-  scale_fill_gradient(low = "#deebf7", high = "#08519c", 
-                      name = "站点数") +
-  labs(
-    title = "因果方向 × 相关性质 交叉统计热图",
-    subtitle = paste("总站点数:", nrow(ccm_results_all)),
-    x = "相关性质",
-    y = "因果方向"
-  ) +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 30, hjust = 1),
-    axis.text.y = element_text(size = 11),
-    plot.title = element_text(face = "bold", size = 14)
+# ============================================================================
+# 5. 温度→SIF因果关系的空间分布可视化
+# ============================================================================
+
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+cat("=== 准备空间分析 ===\n")
+
+# 读取站点坐标
+station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
+  rename_with(~tolower(.x)) %>%
+  select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
+  distinct(meteo_stat_id, .keep_all = TRUE) %>%
+  mutate(meteo_stat_id = as.character(meteo_stat_id))
+
+cat("读取到", nrow(station_coords), "个站点的坐标\n")
+
+# 合并CCM结果和坐标
+temp_to_sif_stations <- ccm_results_all %>%
+  filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
+  left_join(station_coords, by = "meteo_stat_id") %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%
+  mutate(
+    effect_category = case_when(
+      correlation_r < 0 & correlation_p < 0.05 ~ "显著负相关",
+      correlation_r > 0 & correlation_p < 0.05 ~ "显著正相关",
+      TRUE ~ "无显著相关"
+    ),
+    effect_simple = case_when(
+      correlation_r < 0 & correlation_p < 0.05 ~ "负向影响\n(温度↑ SIF↓)",
+      correlation_r > 0 & correlation_p < 0.05 ~ "正向影响\n(温度↑ SIF↑)",
+      TRUE ~ "无显著相关"
+    ),
+    effect_strength = abs(correlation_r)
   )
 
-print(p_heatmap)
-ggsave("data_proc/causality_correlation_heatmap.png", p_heatmap,
-       width = 10, height = 6, dpi = 300)
+cat("\n有温度→SIF因果关系且有坐标的站点:", nrow(temp_to_sif_stations), "\n")
+cat("  • 负向影响:", sum(temp_to_sif_stations$effect_category == "显著负相关"), "\n")
+cat("  • 正向影响:", sum(temp_to_sif_stations$effect_category == "显著正相关"), "\n")
+cat("  • 无显著相关:", sum(temp_to_sif_stations$effect_category == "无显著相关"), "\n\n")
 
-# 5. 创建堆叠柱状图
-p_stacked <- detailed_classification %>%
-  count(causality_type, effect_type) %>%
-  ggplot(aes(x = causality_type, y = n, fill = effect_type)) +
-  geom_bar(stat = "identity", position = "stack") +
-  geom_text(aes(label = n), 
-            position = position_stack(vjust = 0.5),
-            color = "white", fontface = "bold", size = 4) +
-  scale_fill_manual(
+library(rnaturalearth)
+# 获取中国地图
+china_map <- ne_countries(country = "china", scale = "medium", 
+                          returnclass = "sf")
+
+# 地图范围
+bbox <- st_bbox(c(
+  xmin = min(temp_to_sif_stations$lon) - 2,
+  xmax = max(temp_to_sif_stations$lon) + 2,
+  ymin = min(temp_to_sif_stations$lat) - 2,
+  ymax = max(temp_to_sif_stations$lat) + 2
+))
+
+# 主地图
+ggplot() +
+  geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
+  geom_point(data = temp_to_sif_stations,
+             aes(x = longitude, y = latitude, 
+                 color = effect_simple,
+                 size = effect_strength),
+             alpha = 0.7) +
+  scale_color_manual(
     values = c(
-      "显著负相关" = "#d7191c",
-      "弱相关" = "#fdae61",
-      "显著正相关" = "#2c7bb6",
+      "负向影响\n(温度↑ SIF↓)" = "#d73027",
+      "正向影响\n(温度↑ SIF↑)" = "#4575b4",
       "无显著相关" = "#999999"
     ),
-    name = "相关性质"
+    name = "效应方向"
+  ) +
+  scale_size_continuous(
+    range = c(1, 3),
+    name = "相关强度\n|r|",
+    breaks = c(0.2, 0.4, 0.6)
   ) +
   labs(
-    title = "各因果类型的相关性质分布",
-    subtitle = "堆叠柱状图",
-    x = "因果方向",
-    y = "站点数"
+    title = "热月温度异常对SIF的因果效应空间分布",
+    subtitle = paste0("有因果关系的站点 (n=", nrow(temp_to_sif_stations), 
+                      ") | Tp=1 (滞后1月)"),
+    x = "经度",
+    y = "纬度"
   ) +
   theme_minimal() +
   theme(
-    axis.text.x = element_text(angle = 20, hjust = 1),
-    plot.title = element_text(face = "bold", size = 14),
-    legend.position = "right"
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "right",
+    panel.grid = element_line(color = "gray90", linewidth = 0.2),
+    panel.background = element_rect(fill = "aliceblue", color = NA)
   )
-
-print(p_stacked)
