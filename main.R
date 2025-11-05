@@ -1,4 +1,5 @@
-pacman::p_load(dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, tidyr)
+pacman::p_load(dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, tidyr, showtext, rEDM)
+showtext_auto()
 
 # 读取数据
 meteo_sif_data <- read.csv("data_raw/meteo_stat_SIF_data.csv") %>% 
@@ -109,421 +110,17 @@ data_for_ccm_linear <- meteo_data_detrended_linear %>%
          sif = sif_detrended,
          is_hot_month)
 
-# ============================================================================
-# 差分去趋势完整分析
-# ============================================================================
+# CCM ----
+pacman::p_load(dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, 
+               tidyr, rEDM, sf, rnaturalearth, rnaturalearthdata)
 
-cat("\n" , rep("=", 70), "\n", sep = "")
-cat("               差分去趋势 vs 线性去趋势 完整对比分析\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
-# 创建差分去趋势数据
-meteo_data_detrended_diff <- meteo_data_summer %>%
-  group_by(meteo_stat_id) %>%
-  arrange(year, month) %>%
-  mutate(
-    temp_anomaly_diff = temp_anomaly - lag(temp_anomaly),
-    sif_diff = sif - lag(sif)
-  ) %>%
-  ungroup() %>%
-  filter(!is.na(temp_anomaly_diff), !is.na(sif_diff))
-
-data_for_ccm_diff <- meteo_data_detrended_diff %>%
-  select(meteo_stat_id, year, month, 
-         temp_anomaly = temp_anomaly_diff,
-         sif = sif_diff,
-         is_hot_month)
-
-cat("线性去趋势数据点数:", nrow(data_for_ccm_linear), "\n")
-cat("差分去趋势数据点数:", nrow(data_for_ccm_diff), 
-    "(损失", nrow(data_for_ccm_linear) - nrow(data_for_ccm_diff), "个数据点)\n\n")
+# [之前的数据读取代码保持不变...]
 
 # ============================================================================
-# 1. 单站点详细对比
+# 完整的 CCM + S-map 分析
 # ============================================================================
 
-example_station <- data_for_ccm_linear %>%
-  group_by(meteo_stat_id) %>%
-  summarise(n = n()) %>%
-  filter(n >= 30) %>%
-  slice(1) %>%
-  pull(meteo_stat_id)
-
-cat("=== 示例站点:", example_station, "===\n\n")
-
-# 提取数据
-station_linear <- meteo_data_detrended_linear %>%
-  filter(meteo_stat_id == example_station) %>%
-  arrange(year, month) %>%
-  mutate(date = as.Date(paste(year, month, 1, sep = "-")))
-
-station_diff <- meteo_data_detrended_diff %>%
-  filter(meteo_stat_id == example_station) %>%
-  arrange(year, month) %>%
-  mutate(date = as.Date(paste(year, month, 1, sep = "-")))
-
-station_original <- meteo_data_summer %>%
-  filter(meteo_stat_id == example_station) %>%
-  arrange(year, month) %>%
-  mutate(date = as.Date(paste(year, month, 1, sep = "-")))
-
-# 可视化对比
-cat("【1. 温度异常的不同去趋势方法对比】\n")
-
-p_temp_compare <- ggplot() +
-  geom_line(data = station_original,
-            aes(x = date, y = temp_anomaly, color = "原始数据"),
-            alpha = 0.5, linewidth = 0.8) +
-  geom_line(data = station_linear,
-            aes(x = date, y = temp_anomaly_detrended, color = "线性去趋势"),
-            linewidth = 0.8) +
-  scale_color_manual(values = c(
-    "原始数据" = "gray50",
-    "线性去趋势" = "blue"
-  )) +
-  labs(
-    title = paste("站点", example_station, "- 温度异常去趋势对比"),
-    subtitle = "线性去趋势 vs 原始数据",
-    x = "时间",
-    y = "温度异常 (°C)",
-    color = "方法"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_temp_compare)
-
-p_temp_diff <- ggplot(station_diff, aes(x = date, y = temp_anomaly_diff)) +
-  geom_line(color = "red", linewidth = 0.8) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
-  labs(
-    title = paste("站点", example_station, "- 差分去趋势结果"),
-    subtitle = "逐月变化量（Δ温度异常）",
-    x = "时间",
-    y = "温度异常变化量 (°C)",
-    caption = "差分后表示的是变化量"
-  ) +
-  theme_minimal()
-
-print(p_temp_diff)
-
-cat("\n【2. SIF的不同去趋势方法对比】\n")
-
-p_sif_compare <- ggplot() +
-  geom_line(data = station_original,
-            aes(x = date, y = sif, color = "原始数据"),
-            alpha = 0.5, linewidth = 0.8) +
-  geom_line(data = station_linear,
-            aes(x = date, y = sif_detrended, color = "线性去趋势"),
-            linewidth = 0.8) +
-  scale_color_manual(values = c(
-    "原始数据" = "gray50",
-    "线性去趋势" = "darkgreen"
-  )) +
-  labs(
-    title = paste("站点", example_station, "- SIF去趋势对比"),
-    subtitle = "线性去趋势 vs 原始数据",
-    x = "时间",
-    y = "SIF",
-    color = "方法"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_sif_compare)
-
-p_sif_diff <- ggplot(station_diff, aes(x = date, y = sif_diff)) +
-  geom_line(color = "red", linewidth = 0.8) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
-  labs(
-    title = paste("站点", example_station, "- 差分去趋势结果"),
-    subtitle = "逐月变化量（ΔSIF）",
-    x = "时间",
-    y = "SIF变化量"
-  ) +
-  theme_minimal()
-
-print(p_sif_diff)
-
-# 统计特征
-cat("\n【3. 统计特征对比】\n\n")
-
-stats_compare <- tibble(
-  方法 = c("原始数据", "线性去趋势", "差分去趋势"),
-  温度_均值 = c(
-    mean(station_original$temp_anomaly, na.rm = TRUE),
-    mean(station_linear$temp_anomaly_detrended, na.rm = TRUE),
-    mean(station_diff$temp_anomaly_diff, na.rm = TRUE)
-  ),
-  温度_标准差 = c(
-    sd(station_original$temp_anomaly, na.rm = TRUE),
-    sd(station_linear$temp_anomaly_detrended, na.rm = TRUE),
-    sd(station_diff$temp_anomaly_diff, na.rm = TRUE)
-  ),
-  SIF_均值 = c(
-    mean(station_original$sif, na.rm = TRUE),
-    mean(station_linear$sif_detrended, na.rm = TRUE),
-    mean(station_diff$sif_diff, na.rm = TRUE)
-  ),
-  SIF_标准差 = c(
-    sd(station_original$sif, na.rm = TRUE),
-    sd(station_linear$sif_detrended, na.rm = TRUE),
-    sd(station_diff$sif_diff, na.rm = TRUE)
-  )
-) %>%
-  mutate(across(where(is.numeric), ~round(.x, 4)))
-
-print(stats_compare)
-
-# 相关性对比
-cat("\n【4. 温度-SIF相关性对比】\n\n")
-
-station_linear_lag <- station_linear %>%
-  mutate(sif_lag1 = lead(sif_detrended, 1))
-
-cor_linear <- cor.test(station_linear_lag$temp_anomaly_detrended,
-                       station_linear_lag$sif_lag1)
-
-station_diff_lag <- station_diff %>%
-  mutate(sif_lag1 = lead(sif_diff, 1))
-
-cor_diff <- cor.test(station_diff_lag$temp_anomaly_diff,
-                     station_diff_lag$sif_lag1)
-
-cat("线性去趋势:\n")
-cat("  r =", round(cor_linear$estimate, 3), "\n")
-cat("  p =", format.pval(cor_linear$p.value), "\n\n")
-
-cat("差分去趋势:\n")
-cat("  r =", round(cor_diff$estimate, 3), "\n")
-cat("  p =", format.pval(cor_diff$p.value), "\n\n")
-
-# 散点图
-p_cor_linear <- ggplot(station_linear_lag, 
-                       aes(x = temp_anomaly_detrended, y = sif_lag1)) +
-  geom_point(alpha = 0.5, color = "blue") +
-  geom_smooth(method = "lm", se = TRUE, color = "blue") +
-  labs(
-    title = "线性去趋势：t月温度 vs t+1月SIF",
-    subtitle = paste0("r = ", round(cor_linear$estimate, 3), 
-                      ", p = ", format.pval(cor_linear$p.value, digits = 2)),
-    x = "t月温度异常",
-    y = "t+1月SIF"
-  ) +
-  theme_minimal()
-
-print(p_cor_linear)
-
-p_cor_diff <- ggplot(station_diff_lag,
-                     aes(x = temp_anomaly_diff, y = sif_lag1)) +
-  geom_point(alpha = 0.5, color = "red") +
-  geom_smooth(method = "lm", se = TRUE, color = "red") +
-  labs(
-    title = "差分去趋势：t月温度变化 vs t+1月SIF变化",
-    subtitle = paste0("r = ", round(cor_diff$estimate, 3), 
-                      ", p = ", format.pval(cor_diff$p.value, digits = 2)),
-    x = "t月温度异常变化量",
-    y = "t+1月SIF变化量"
-  ) +
-  theme_minimal()
-
-print(p_cor_diff)
-
-# ============================================================================
-# 2. 完整CCM分析对比（单站点）
-# ============================================================================
-
-cat("\n【5. 完整CCM分析对比】\n\n")
-
-library(rEDM)
-
-# 准备线性去趋势的CCM数据
-ccm_data_linear <- data.frame(
-  time = 1:nrow(station_linear),
-  temp_anomaly = station_linear$temp_anomaly_detrended,
-  sif = station_linear$sif_detrended
-)
-
-# 准备差分去趋势的CCM数据
-ccm_data_diff <- data.frame(
-  time = 1:nrow(station_diff),
-  temp_anomaly = station_diff$temp_anomaly_diff,
-  sif = station_diff$sif_diff
-)
-
-cat("--- 线性去趋势 CCM 分析 ---\n")
-
-# 确定最优E（线性）
-n_linear <- nrow(ccm_data_linear)
-lib_pred_linear <- min(100, n_linear)
-
-embed_temp_linear <- EmbedDimension(
-  dataFrame = ccm_data_linear,
-  lib = paste("1", lib_pred_linear),
-  pred = paste("1", lib_pred_linear),
-  columns = "temp_anomaly",
-  target = "temp_anomaly",
-  maxE = 10,
-  showPlot = FALSE
-)
-
-embed_sif_linear <- EmbedDimension(
-  dataFrame = ccm_data_linear,
-  lib = paste("1", lib_pred_linear),
-  pred = paste("1", lib_pred_linear),
-  columns = "sif",
-  target = "sif",
-  maxE = 10,
-  showPlot = FALSE
-)
-
-best_E_temp_linear <- embed_temp_linear$E[which.max(embed_temp_linear$rho)]
-best_E_sif_linear <- embed_sif_linear$E[which.max(embed_sif_linear$rho)]
-E_ccm_linear <- max(best_E_temp_linear, best_E_sif_linear)
-
-cat("最优 E =", E_ccm_linear, "\n")
-
-# CCM分析（线性）
-tau <- 1
-embedding_loss_linear <- (E_ccm_linear - 1) * tau
-tp <- 1
-max_lib_linear <- n_linear - embedding_loss_linear - tp
-
-lib_start_linear <- max(E_ccm_linear + 2, 10)
-lib_end_linear <- max_lib_linear
-lib_step_linear <- max(2, floor((lib_end_linear - lib_start_linear) / 15))
-libSizes_str_linear <- paste(lib_start_linear, lib_end_linear, lib_step_linear)
-
-ccm_linear_result <- CCM(
-  dataFrame = ccm_data_linear,
-  E = E_ccm_linear,
-  Tp = 1,
-  columns = "temp_anomaly",
-  target = "sif",
-  libSizes = libSizes_str_linear,
-  sample = 100,
-  random = TRUE,
-  showPlot = FALSE
-)
-
-ccm_linear_summary <- ccm_linear_result %>%
-  rename(lib_size = LibSize) %>%
-  group_by(lib_size) %>%
-  summarise(
-    rho_temp_to_sif = mean(`temp_anomaly:sif`, na.rm = TRUE),
-    rho_sif_to_temp = mean(`sif:temp_anomaly`, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(method = "线性去趋势")
-
-cat("最终 ρ (Temp→SIF) =", 
-    round(ccm_linear_summary$rho_temp_to_sif[nrow(ccm_linear_summary)], 3), "\n")
-cat("最终 ρ (SIF→Temp) =", 
-    round(ccm_linear_summary$rho_sif_to_temp[nrow(ccm_linear_summary)], 3), "\n\n")
-
-cat("--- 差分去趋势 CCM 分析 ---\n")
-
-# 确定最优E（差分）
-n_diff <- nrow(ccm_data_diff)
-lib_pred_diff <- min(100, n_diff)
-
-embed_temp_diff <- EmbedDimension(
-  dataFrame = ccm_data_diff,
-  lib = paste("1", lib_pred_diff),
-  pred = paste("1", lib_pred_diff),
-  columns = "temp_anomaly",
-  target = "temp_anomaly",
-  maxE = 10,
-  showPlot = FALSE
-)
-
-embed_sif_diff <- EmbedDimension(
-  dataFrame = ccm_data_diff,
-  lib = paste("1", lib_pred_diff),
-  pred = paste("1", lib_pred_diff),
-  columns = "sif",
-  target = "sif",
-  maxE = 10,
-  showPlot = FALSE
-)
-
-best_E_temp_diff <- embed_temp_diff$E[which.max(embed_temp_diff$rho)]
-best_E_sif_diff <- embed_sif_diff$E[which.max(embed_sif_diff$rho)]
-E_ccm_diff <- max(best_E_temp_diff, best_E_sif_diff)
-
-cat("最优 E =", E_ccm_diff, "\n")
-
-# CCM分析（差分）
-embedding_loss_diff <- (E_ccm_diff - 1) * tau
-max_lib_diff <- n_diff - embedding_loss_diff - tp
-
-lib_start_diff <- max(E_ccm_diff + 2, 10)
-lib_end_diff <- max_lib_diff
-lib_step_diff <- max(2, floor((lib_end_diff - lib_start_diff) / 15))
-libSizes_str_diff <- paste(lib_start_diff, lib_end_diff, lib_step_diff)
-
-ccm_diff_result <- CCM(
-  dataFrame = ccm_data_diff,
-  E = E_ccm_diff,
-  Tp = 1,
-  columns = "temp_anomaly",
-  target = "sif",
-  libSizes = libSizes_str_diff,
-  sample = 100,
-  random = TRUE,
-  showPlot = FALSE
-)
-
-ccm_diff_summary <- ccm_diff_result %>%
-  rename(lib_size = LibSize) %>%
-  group_by(lib_size) %>%
-  summarise(
-    rho_temp_to_sif = mean(`temp_anomaly:sif`, na.rm = TRUE),
-    rho_sif_to_temp = mean(`sif:temp_anomaly`, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(method = "差分去趋势")
-
-cat("最终 ρ (Temp→SIF) =", 
-    round(ccm_diff_summary$rho_temp_to_sif[nrow(ccm_diff_summary)], 3), "\n")
-cat("最终 ρ (SIF→Temp) =", 
-    round(ccm_diff_summary$rho_sif_to_temp[nrow(ccm_diff_summary)], 3), "\n\n")
-
-# CCM对比图
-ccm_combined <- bind_rows(ccm_linear_summary, ccm_diff_summary)
-
-p_ccm_compare <- ggplot(ccm_combined, 
-                        aes(x = lib_size, y = rho_temp_to_sif, 
-                            color = method, linetype = method)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 2) +
-  geom_hline(yintercept = 0.1, linetype = "dashed", 
-             color = "gray", alpha = 0.5) +
-  scale_color_manual(values = c("线性去趋势" = "blue", 
-                                "差分去趋势" = "red")) +
-  labs(
-    title = paste("CCM对比: 温度→SIF - 站点", example_station),
-    subtitle = "不同去趋势方法的因果强度",
-    x = "Library Size",
-    y = "Cross Map Skill (ρ)",
-    color = "去趋势方法",
-    linetype = "去趋势方法"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_ccm_compare)
-
-# ============================================================================
-# 3. 批量分析：线性去趋势（主分析）
-# ============================================================================
-
-cat("\n" , rep("=", 70), "\n", sep = "")
-cat("                开始批量CCM分析（线性去趋势）\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
-# CCM分析函数
-perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
+perform_ccm_with_smap <- function(station_id, data, min_points = 30) {
   
   station_data <- data %>%
     filter(meteo_stat_id == station_id) %>%
@@ -538,8 +135,6 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
   }
   
   tryCatch({
-    station_data_with_lag <- station_data %>%
-      mutate(sif_lag1 = lead(sif, 1))
     
     station_data_ccm <- data.frame(
       time = 1:n_data,
@@ -549,6 +144,7 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
     
     lib_pred_size <- min(100, n_data)
     
+    # 1. 确定最优 E
     embed_temp <- EmbedDimension(
       dataFrame = station_data_ccm,
       lib = paste("1", lib_pred_size),
@@ -573,6 +169,7 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
     best_E_sif <- embed_sif$E[which.max(embed_sif$rho)]
     E_ccm <- max(best_E_temp, best_E_sif)
     
+    # 2. CCM 分析
     tau <- 1
     embedding_loss <- (E_ccm - 1) * tau
     tp <- 1
@@ -588,10 +185,11 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
     lib_step <- max(2, floor((lib_end - lib_start) / 10))
     libSizes_str <- paste(lib_start, lib_end, lib_step)
     
-    ccm_result <- CCM(
+    # Temp → SIF 方向
+    ccm_temp_to_sif <- CCM(
       dataFrame = station_data_ccm,
       E = E_ccm,
-      Tp = 1,
+      Tp = tp,
       columns = "temp_anomaly",
       target = "sif",
       libSizes = libSizes_str,
@@ -600,31 +198,122 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
       showPlot = FALSE
     )
     
-    ccm_summary <- ccm_result %>%
+    # SIF → Temp 方向
+    ccm_sif_to_temp <- CCM(
+      dataFrame = station_data_ccm,
+      E = E_ccm,
+      Tp = tp,
+      columns = "sif",
+      target = "temp_anomaly",
+      libSizes = libSizes_str,
+      sample = 50,
+      random = TRUE,
+      showPlot = FALSE
+    )
+    
+    # CCM 结果汇总
+    ccm_summary_temp_sif <- ccm_temp_to_sif %>%
       rename(lib_size = LibSize) %>%
       group_by(lib_size) %>%
       summarise(
-        rho_temp_to_sif_mean = mean(`temp_anomaly:sif`, na.rm = TRUE),
-        rho_temp_to_sif_sd = sd(`temp_anomaly:sif`, na.rm = TRUE),
-        rho_sif_to_temp_mean = mean(`sif:temp_anomaly`, na.rm = TRUE),
-        rho_sif_to_temp_sd = sd(`sif:temp_anomaly`, na.rm = TRUE),
+        rho_mean = mean(`temp_anomaly:sif`, na.rm = TRUE),
+        rho_sd = sd(`temp_anomaly:sif`, na.rm = TRUE),
         .groups = "drop"
-      )
+      ) %>%
+      mutate(direction = "Temp → SIF")
     
-    final_rho_temp_to_sif <- ccm_summary$rho_temp_to_sif_mean[nrow(ccm_summary)]
-    final_rho_sif_to_temp <- ccm_summary$rho_sif_to_temp_mean[nrow(ccm_summary)]
+    ccm_summary_sif_temp <- ccm_sif_to_temp %>%
+      rename(lib_size = LibSize) %>%
+      group_by(lib_size) %>%
+      summarise(
+        rho_mean = mean(`sif:temp_anomaly`, na.rm = TRUE),
+        rho_sd = sd(`sif:temp_anomaly`, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(direction = "SIF → Temp")
     
-    trend_temp_to_sif <- cor(ccm_summary$lib_size, 
-                             ccm_summary$rho_temp_to_sif_mean)
-    trend_sif_to_temp <- cor(ccm_summary$lib_size, 
-                             ccm_summary$rho_sif_to_temp_mean)
+    final_rho_temp_to_sif <- ccm_summary_temp_sif$rho_mean[nrow(ccm_summary_temp_sif)]
+    final_rho_sif_to_temp <- ccm_summary_sif_temp$rho_mean[nrow(ccm_summary_sif_temp)]
     
-    cor_result <- cor.test(station_data_with_lag$temp_anomaly, 
-                           station_data_with_lag$sif_lag1)
+    trend_temp_to_sif <- cor(ccm_summary_temp_sif$lib_size, 
+                             ccm_summary_temp_sif$rho_mean)
+    trend_sif_to_temp <- cor(ccm_summary_sif_temp$lib_size, 
+                             ccm_summary_sif_temp$rho_mean)
     
-    correlation_r <- cor_result$estimate
-    correlation_p <- cor_result$p.value
+    # 3. S-map 分析（Temp → SIF）
+    smap_temp_to_sif <- SMap(
+      dataFrame = station_data_ccm,
+      lib = paste("1", n_data),
+      pred = paste("1", n_data),
+      E = E_ccm,
+      theta = 2,
+      columns = "temp_anomaly",
+      target = "sif",
+      embedded = FALSE
+    )
     
+    # 提取 S-map 系数
+    smap_coeffs <- smap_temp_to_sif$coefficients
+    
+    if (!is.null(smap_coeffs) && ncol(smap_coeffs) >= 2) {
+      # 找到温度对应的列
+      temp_coef_col <- which(grepl("temp", colnames(smap_coeffs), ignore.case = TRUE))
+      
+      if (length(temp_coef_col) > 0) {
+        smap_coef_temp <- smap_coeffs[, temp_coef_col[1]]
+      } else {
+        # 假设第2列是自变量系数（第1列通常是截距）
+        smap_coef_temp <- smap_coeffs[, 2]
+      }
+      
+      smap_coef_temp <- smap_coef_temp[!is.na(smap_coef_temp)]
+      
+      mean_smap_coef <- mean(smap_coef_temp, na.rm = TRUE)
+      sd_smap_coef <- sd(smap_coef_temp, na.rm = TRUE)
+      median_smap_coef <- median(smap_coef_temp, na.rm = TRUE)
+      
+    } else {
+      mean_smap_coef <- NA
+      sd_smap_coef <- NA
+      median_smap_coef <- NA
+      smap_coef_temp <- NA
+    }
+    
+    # S-map 分析（SIF → Temp）
+    smap_sif_to_temp <- SMap(
+      dataFrame = station_data_ccm,
+      lib = paste("1", n_data),
+      pred = paste("1", n_data),
+      E = E_ccm,
+      theta = 2,
+      columns = "sif",
+      target = "temp_anomaly",
+      embedded = FALSE
+    )
+    
+    smap_coeffs_sif <- smap_sif_to_temp$coefficients
+    
+    if (!is.null(smap_coeffs_sif) && ncol(smap_coeffs_sif) >= 2) {
+      sif_coef_col <- which(grepl("sif", colnames(smap_coeffs_sif), ignore.case = TRUE))
+      
+      if (length(sif_coef_col) > 0) {
+        smap_coef_sif <- smap_coeffs_sif[, sif_coef_col[1]]
+      } else {
+        smap_coef_sif <- smap_coeffs_sif[, 2]
+      }
+      
+      smap_coef_sif <- smap_coef_sif[!is.na(smap_coef_sif)]
+      
+      mean_smap_coef_sif <- mean(smap_coef_sif, na.rm = TRUE)
+      sd_smap_coef_sif <- sd(smap_coef_sif, na.rm = TRUE)
+      
+    } else {
+      mean_smap_coef_sif <- NA
+      sd_smap_coef_sif <- NA
+      smap_coef_sif <- NA
+    }
+    
+    # 4. 判断因果关系
     ccm_threshold_rho <- 0.1
     ccm_threshold_trend <- 0
     
@@ -633,99 +322,64 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
     sif_causes_temp <- (final_rho_sif_to_temp > ccm_threshold_rho & 
                           trend_sif_to_temp > ccm_threshold_trend)
     
-    causality_type <- case_when(
+    # 因果方向
+    causality_direction <- case_when(
       temp_causes_sif & !sif_causes_temp ~ "Temp → SIF",
       !temp_causes_sif & sif_causes_temp ~ "SIF → Temp",
       temp_causes_sif & sif_causes_temp ~ "双向因果",
       TRUE ~ "无显著因果"
     )
     
-    effect_direction <- case_when(
-      correlation_p >= 0.05 ~ "不显著",
-      correlation_r < 0 ~ "负向(温度↑ SIF↓)",
-      correlation_r > 0 ~ "正向(温度↑ SIF↑)",
-      TRUE ~ "无关"
+    # 效应类型（仅针对 Temp → SIF）
+    effect_type_temp_sif <- case_when(
+      !temp_causes_sif ~ "无因果",
+      is.na(mean_smap_coef) ~ "S-map失败",
+      mean_smap_coef > 0.001 ~ "促进效应(+)",
+      mean_smap_coef < -0.001 ~ "抑制效应(-)",
+      TRUE ~ "效应极弱"
     )
     
-    ccm_plot <- ggplot(ccm_summary) +
-      geom_line(aes(x = lib_size, y = rho_temp_to_sif_mean, 
-                    color = "Temp → SIF"), linewidth = 1) +
-      geom_point(aes(x = lib_size, y = rho_temp_to_sif_mean, 
-                     color = "Temp → SIF"), size = 2) +
-      geom_ribbon(aes(x = lib_size, 
-                      ymin = rho_temp_to_sif_mean - rho_temp_to_sif_sd,
-                      ymax = rho_temp_to_sif_mean + rho_temp_to_sif_sd,
-                      fill = "Temp → SIF"),
-                  alpha = 0.2) +
-      geom_line(aes(x = lib_size, y = rho_sif_to_temp_mean, 
-                    color = "SIF → Temp"), linewidth = 1) +
-      geom_point(aes(x = lib_size, y = rho_sif_to_temp_mean, 
-                     color = "SIF → Temp"), size = 2) +
-      geom_ribbon(aes(x = lib_size, 
-                      ymin = rho_sif_to_temp_mean - rho_sif_to_temp_sd,
-                      ymax = rho_sif_to_temp_mean + rho_sif_to_temp_sd,
-                      fill = "SIF → Temp"),
-                  alpha = 0.2) +
-      geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
-      geom_hline(yintercept = ccm_threshold_rho, linetype = "dashed", 
-                 color = "red", alpha = 0.3) +
-      scale_color_manual(values = c("Temp → SIF" = "#377EB8", 
-                                    "SIF → Temp" = "#E41A1C")) +
-      scale_fill_manual(values = c("Temp → SIF" = "#377EB8", 
-                                   "SIF → Temp" = "#E41A1C")) +
-      labs(
-        title = paste("站点", station_id, "- CCM分析 (Tp=1)"),
-        subtitle = paste0(
-          "因果: ", causality_type, " | ",
-          "ρ(T→S)=", round(final_rho_temp_to_sif, 2), " | ",
-          "ρ(S→T)=", round(final_rho_sif_to_temp, 2)
-        ),
-        x = "Library Size",
-        y = "Cross Map Skill (ρ)",
-        color = "方向",
-        fill = "方向"
-      ) +
-      theme_minimal() +
-      theme(legend.position = "bottom")
+    # 效应类型（仅针对 SIF → Temp）
+    effect_type_sif_temp <- case_when(
+      !sif_causes_temp ~ "无因果",
+      is.na(mean_smap_coef_sif) ~ "S-map失败",
+      mean_smap_coef_sif > 0.001 ~ "促进效应(+)",
+      mean_smap_coef_sif < -0.001 ~ "抑制效应(-)",
+      TRUE ~ "效应极弱"
+    )
     
-    cor_plot <- ggplot(station_data_with_lag, 
-                       aes(x = temp_anomaly, y = sif_lag1)) +
-      geom_point(alpha = 0.5, size = 2) +
-      geom_smooth(method = "lm", se = TRUE, color = "blue", linewidth = 1) +
-      labs(
-        title = paste("站点", station_id, "- 相关性分析 (Tp=1)"),
-        subtitle = paste0(
-          "效应: ", effect_direction, " | ",
-          "r=", round(correlation_r, 3), " | ",
-          "p=", format.pval(correlation_p, digits = 2)
-        ),
-        x = "t月温度异常 (°C)",
-        y = "t+1月SIF"
-      ) +
-      theme_minimal()
-    
+    # 返回结果
     tibble(
       meteo_stat_id = station_id,
       n_points = n_data,
-      max_lib_size = max_available_lib,
       E = E_ccm,
-      best_E_temp = best_E_temp,
-      best_E_sif = best_E_sif,
+      
+      # CCM 结果
       rho_temp_to_sif = final_rho_temp_to_sif,
       trend_temp_to_sif = trend_temp_to_sif,
       rho_sif_to_temp = final_rho_sif_to_temp,
       trend_sif_to_temp = trend_sif_to_temp,
+      
+      # 因果判断
       temp_causes_sif = temp_causes_sif,
       sif_causes_temp = sif_causes_temp,
-      causality_type = causality_type,
-      correlation_r = correlation_r,
-      correlation_p = correlation_p,
-      effect_direction = effect_direction,
-      ccm_summary_data = list(ccm_summary),
-      ccm_raw_data = list(ccm_result),
-      correlation_data = list(station_data_with_lag),
-      ccm_plot = list(ccm_plot),
-      cor_plot = list(cor_plot)
+      causality_direction = causality_direction,
+      
+      # S-map 效应指数（Temp → SIF）
+      effect_index_temp_sif = mean_smap_coef,      # 效应指数
+      effect_index_sd_temp_sif = sd_smap_coef,
+      effect_index_median_temp_sif = median_smap_coef,
+      effect_type_temp_sif = effect_type_temp_sif,
+      
+      # S-map 效应指数（SIF → Temp）
+      effect_index_sif_temp = mean_smap_coef_sif,
+      effect_index_sd_sif_temp = sd_smap_coef_sif,
+      effect_type_sif_temp = effect_type_sif_temp,
+      
+      # 保存详细数据
+      smap_coefficients_temp_sif = list(smap_coef_temp),
+      smap_coefficients_sif_temp = list(smap_coef_sif),
+      ccm_summary_data = list(bind_rows(ccm_summary_temp_sif, ccm_summary_sif_temp))
     )
     
   }, error = function(e) {
@@ -734,492 +388,269 @@ perform_ccm_with_correlation <- function(station_id, data, min_points = 30) {
   })
 }
 
+# ============================================================================
 # 批量分析
+# ============================================================================
+
+cat("\n开始批量CCM+S-map分析...\n\n")
+
 all_stations <- data_for_ccm_linear %>%
   group_by(meteo_stat_id) %>%
   summarise(n = n()) %>%
   filter(n >= 30) %>%
   pull(meteo_stat_id)
 
-cat("\n准备分析", length(all_stations), "个站点（线性去趋势）...\n\n")
+cat("准备分析", length(all_stations), "个站点...\n\n")
 
-ccm_results_linear <- map_dfr(seq_along(all_stations), function(i) {
-  if (i %% 50 == 0) {
+ccm_results_all <- map_dfr(seq_along(all_stations), function(i) {
+  if (i %% 10 == 0) {
     cat("已完成:", i, "/", length(all_stations), "\n")
   }
-  perform_ccm_with_correlation(all_stations[i], data_for_ccm_linear, min_points = 30)
+  perform_ccm_with_smap(all_stations[i], data_for_ccm_linear, min_points = 30)
 })
 
-cat("\n成功分析的站点数:", nrow(ccm_results_linear), "/", length(all_stations), "\n")
+cat("\n成功分析的站点数:", nrow(ccm_results_all), "/", length(all_stations), "\n\n")
 
 # ============================================================================
-# 4. 批量分析：差分去趋势（对比分析）
+# 详细统计
 # ============================================================================
 
-cat("\n" , rep("=", 70), "\n", sep = "")
-cat("                开始批量CCM分析（差分去趋势）\n")
+cat("\n", rep("=", 70), "\n", sep = "")
+cat("                   统计结果\n")
 cat(rep("=", 70), "\n\n", sep = "")
 
-all_stations_diff <- data_for_ccm_diff %>%
-  group_by(meteo_stat_id) %>%
-  summarise(n = n()) %>%
-  filter(n >= 30) %>%
-  pull(meteo_stat_id)
+# 1. 因果方向统计
+cat("【1. 因果方向统计】\n")
+causality_stats <- table(ccm_results_all$causality_direction)
+print(causality_stats)
+cat("\n百分比:\n")
+print(round(prop.table(causality_stats) * 100, 1))
+cat("\n")
 
-cat("准备分析", length(all_stations_diff), "个站点（差分去趋势）...\n\n")
+# 2. Temp → SIF 的效应类型统计
+cat("【2. Temp → SIF 效应类型统计】\n")
+temp_to_sif_results <- ccm_results_all %>%
+  filter(causality_direction %in% c("Temp → SIF", "双向因果"))
 
-ccm_results_diff <- map_dfr(seq_along(all_stations_diff), function(i) {
-  if (i %% 50 == 0) {
-    cat("已完成:", i, "/", length(all_stations_diff), "\n")
-  }
-  perform_ccm_with_correlation(all_stations_diff[i], data_for_ccm_diff, min_points = 30)
-})
+effect_stats_temp_sif <- table(temp_to_sif_results$effect_type_temp_sif)
+print(effect_stats_temp_sif)
+cat("\n百分比:\n")
+print(round(prop.table(effect_stats_temp_sif) * 100, 1))
+cat("\n")
 
-cat("\n成功分析的站点数:", nrow(ccm_results_diff), "/", length(all_stations_diff), "\n")
+# 3. SIF → Temp 的效应类型统计
+cat("【3. SIF → Temp 效应类型统计】\n")
+sif_to_temp_results <- ccm_results_all %>%
+  filter(causality_direction %in% c("SIF → Temp", "双向因果"))
 
-# ============================================================================
-# 5. 两种方法的批量结果对比
-# ============================================================================
-
-cat("\n" , rep("=", 70), "\n", sep = "")
-cat("              两种去趋势方法的批量结果对比\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
-cat("=== 线性去趋势结果 ===\n\n")
-
-causality_stats_linear <- table(ccm_results_linear$causality_type)
-print(causality_stats_linear)
-
-cat("\n各因果类型占比:\n")
-print(round(prop.table(causality_stats_linear) * 100, 1))
-
-effect_stats_linear <- ccm_results_linear %>%
-  filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-  count(effect_direction) %>%
-  mutate(pct = round(n / sum(n) * 100, 1))
-
-cat("\n温度→SIF的效应方向统计:\n")
-print(effect_stats_linear)
-
-cat("\n=== 差分去趋势结果 ===\n\n")
-
-causality_stats_diff <- table(ccm_results_diff$causality_type)
-print(causality_stats_diff)
-
-cat("\n各因果类型占比:\n")
-print(round(prop.table(causality_stats_diff) * 100, 1))
-
-effect_stats_diff <- ccm_results_diff %>%
-  filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-  count(effect_direction) %>%
-  mutate(pct = round(n / sum(n) * 100, 1))
-
-cat("\n温度→SIF的效应方向统计:\n")
-print(effect_stats_diff)
-
-# 对比汇总
-cat("\n=== 综合对比 ===\n\n")
-
-comparison_summary <- tibble(
-  去趋势方法 = c("线性去趋势", "差分去趋势"),
-  总站点数 = c(nrow(ccm_results_linear), nrow(ccm_results_diff)),
-  有Temp到SIF因果 = c(
-    sum(ccm_results_linear$causality_type %in% c("Temp → SIF", "双向因果")),
-    sum(ccm_results_diff$causality_type %in% c("Temp → SIF", "双向因果"))
-  ),
-  其中负向影响 = c(
-    sum(ccm_results_linear$causality_type %in% c("Temp → SIF", "双向因果") & 
-          ccm_results_linear$correlation_r < 0 & 
-          ccm_results_linear$correlation_p < 0.05),
-    sum(ccm_results_diff$causality_type %in% c("Temp → SIF", "双向因果") & 
-          ccm_results_diff$correlation_r < 0 & 
-          ccm_results_diff$correlation_p < 0.05)
-  ),
-  其中正向影响 = c(
-    sum(ccm_results_linear$causality_type %in% c("Temp → SIF", "双向因果") & 
-          ccm_results_linear$correlation_r > 0 & 
-          ccm_results_linear$correlation_p < 0.05),
-    sum(ccm_results_diff$causality_type %in% c("Temp → SIF", "双向因果") & 
-          ccm_results_diff$correlation_r > 0 & 
-          ccm_results_diff$correlation_p < 0.05)
-  ),
-  平均CCM强度 = c(
-    mean(ccm_results_linear$rho_temp_to_sif[
-      ccm_results_linear$causality_type %in% c("Temp → SIF", "双向因果")
-    ], na.rm = TRUE),
-    mean(ccm_results_diff$rho_temp_to_sif[
-      ccm_results_diff$causality_type %in% c("Temp → SIF", "双向因果")
-    ], na.rm = TRUE)
-  ),
-  平均相关系数 = c(
-    mean(ccm_results_linear$correlation_r[
-      ccm_results_linear$causality_type %in% c("Temp → SIF", "双向因果")
-    ], na.rm = TRUE),
-    mean(ccm_results_diff$correlation_r[
-      ccm_results_diff$causality_type %in% c("Temp → SIF", "双向因果")
-    ], na.rm = TRUE)
-  )
-) %>%
-  mutate(across(where(is.numeric), ~round(.x, 3)))
-
-print(comparison_summary)
-
-# 可视化对比
-library(patchwork)
-
-# 因果类型分布对比
-causality_compare_data <- bind_rows(
-  ccm_results_linear %>% 
-    count(causality_type) %>% 
-    mutate(method = "线性去趋势"),
-  ccm_results_diff %>% 
-    count(causality_type) %>% 
-    mutate(method = "差分去趋势")
-)
-
-p_causality_compare <- ggplot(causality_compare_data, 
-                              aes(x = causality_type, y = n, fill = method)) +
-  geom_bar(stat = "identity", position = "dodge") +
-  geom_text(aes(label = n), position = position_dodge(width = 0.9),
-            vjust = -0.5, size = 3) +
-  scale_fill_manual(values = c("线性去趋势" = "#377EB8", 
-                               "差分去趋势" = "#E41A1C")) +
-  labs(
-    title = "因果类型分布对比",
-    x = "因果类型",
-    y = "站点数",
-    fill = "去趋势方法"
-  ) +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 20, hjust = 1),
-    legend.position = "bottom"
-  )
-
-print(p_causality_compare)
-
-# CCM强度分布对比
-ccm_strength_compare <- bind_rows(
-  ccm_results_linear %>% 
-    filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-    select(meteo_stat_id, rho_temp_to_sif) %>%
-    mutate(method = "线性去趋势"),
-  ccm_results_diff %>% 
-    filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-    select(meteo_stat_id, rho_temp_to_sif) %>%
-    mutate(method = "差分去趋势")
-)
-
-p_rho_compare <- ggplot(ccm_strength_compare, 
-                        aes(x = rho_temp_to_sif, fill = method)) +
-  geom_histogram(alpha = 0.6, bins = 30, position = "identity") +
-  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
-  scale_fill_manual(values = c("线性去趋势" = "#377EB8", 
-                               "差分去趋势" = "#E41A1C")) +
-  labs(
-    title = "CCM因果强度分布对比 (Temp→SIF)",
-    x = "ρ (Cross Map Skill)",
-    y = "站点数",
-    fill = "去趋势方法"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_rho_compare)
-
-# 相关系数分布对比
-cor_compare <- bind_rows(
-  ccm_results_linear %>% 
-    filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-    select(meteo_stat_id, correlation_r) %>%
-    mutate(method = "线性去趋势"),
-  ccm_results_diff %>% 
-    filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-    select(meteo_stat_id, correlation_r) %>%
-    mutate(method = "差分去趋势")
-)
-
-p_cor_compare_hist <- ggplot(cor_compare, 
-                             aes(x = correlation_r, fill = method)) +
-  geom_histogram(alpha = 0.6, bins = 30, position = "identity") +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
-  scale_fill_manual(values = c("线性去趋势" = "#377EB8", 
-                               "差分去趋势" = "#E41A1C")) +
-  labs(
-    title = "相关系数分布对比 (Temp→SIF)",
-    x = "Pearson r",
-    y = "站点数",
-    fill = "去趋势方法"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_cor_compare_hist)
-
-# 散点图：两种方法的结果对比（共同站点）
-common_stations <- intersect(ccm_results_linear$meteo_stat_id,
-                             ccm_results_diff$meteo_stat_id)
-
-if (length(common_stations) > 0) {
-  
-  cat("\n共同分析的站点数:", length(common_stations), "\n")
-  
-  comparison_data <- ccm_results_linear %>%
-    filter(meteo_stat_id %in% common_stations) %>%
-    select(meteo_stat_id, rho_linear = rho_temp_to_sif, 
-           r_linear = correlation_r) %>%
-    left_join(
-      ccm_results_diff %>%
-        filter(meteo_stat_id %in% common_stations) %>%
-        select(meteo_stat_id, rho_diff = rho_temp_to_sif, 
-               r_diff = correlation_r),
-      by = "meteo_stat_id"
-    )
-  
-  # CCM强度对比
-  p_rho_scatter <- ggplot(comparison_data, 
-                          aes(x = rho_linear, y = rho_diff)) +
-    geom_point(alpha = 0.5, size = 2) +
-    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-    geom_smooth(method = "lm", se = TRUE, color = "blue") +
-    labs(
-      title = "CCM强度对比：线性 vs 差分",
-      x = "线性去趋势 ρ",
-      y = "差分去趋势 ρ",
-      caption = paste("相关系数:", 
-                      round(cor(comparison_data$rho_linear, 
-                                comparison_data$rho_diff, 
-                                use = "complete.obs"), 3))
-    ) +
-    theme_minimal()
-  
-  print(p_rho_scatter)
-  
-  # 相关系数对比
-  p_r_scatter <- ggplot(comparison_data, 
-                        aes(x = r_linear, y = r_diff)) +
-    geom_point(alpha = 0.5, size = 2) +
-    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-    geom_smooth(method = "lm", se = TRUE, color = "blue") +
-    labs(
-      title = "相关系数对比：线性 vs 差分",
-      x = "线性去趋势 r",
-      y = "差分去趋势 r",
-      caption = paste("相关系数:", 
-                      round(cor(comparison_data$r_linear, 
-                                comparison_data$r_diff, 
-                                use = "complete.obs"), 3))
-    ) +
-    theme_minimal()
-  
-  print(p_r_scatter)
+if (nrow(sif_to_temp_results) > 0) {
+  effect_stats_sif_temp <- table(sif_to_temp_results$effect_type_sif_temp)
+  print(effect_stats_sif_temp)
+  cat("\n百分比:\n")
+  print(round(prop.table(effect_stats_sif_temp) * 100, 1))
+} else {
+  cat("无 SIF → Temp 因果关系的站点\n")
 }
+cat("\n")
 
-# ============================================================================
-# 6. 继续使用线性去趋势进行后续分析
-# ============================================================================
-
-cat("\n" , rep("=", 70), "\n", sep = "")
-cat("            继续使用线性去趋势数据进行后续分析\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
-# 使用线性去趋势的结果
-ccm_results_all <- ccm_results_linear
-
-# 因果方向 × 相关性质的交叉统计
-detailed_classification <- ccm_results_all %>%
-  mutate(
-    effect_type = case_when(
-      correlation_p >= 0.05 ~ "无显著相关",
-      correlation_r < -0.1 ~ "显著负相关",
-      correlation_r > 0.1 ~ "显著正相关",
-      TRUE ~ "弱相关"
-    ),
-    causality_type = factor(causality_type, 
-                            levels = c("Temp → SIF", "SIF → Temp", 
-                                       "双向因果", "无显著因果"))
-  )
-
-cross_table <- detailed_classification %>%
-  count(causality_type, effect_type) %>%
-  pivot_wider(names_from = effect_type, 
+# 4. 因果方向 × 效应类型交叉表
+cat("【4. 因果方向 × 效应类型交叉表（Temp → SIF）】\n")
+cross_table <- temp_to_sif_results %>%
+  count(causality_direction, effect_type_temp_sif) %>%
+  pivot_wider(names_from = effect_type_temp_sif, 
               values_from = n, 
-              values_fill = 0) %>%
-  arrange(causality_type)
+              values_fill = 0)
 
-cat("【交叉统计表】\n")
 print(cross_table)
+cat("\n")
 
-cross_table_pct <- detailed_classification %>%
-  count(causality_type, effect_type) %>%
-  group_by(causality_type) %>%
-  mutate(
-    pct = round(n / sum(n) * 100, 1),
-    label = paste0(n, " (", pct, "%)")
-  ) %>%
-  ungroup() %>%
-  select(-n, -pct) %>%
-  pivot_wider(names_from = effect_type, 
-              values_from = label,
-              values_fill = "0 (0%)")
+# 5. 效应指数统计
+cat("【5. 效应指数（S-map系数）统计】\n\n")
 
-cat("\n【交叉统计表（含百分比）】\n")
-print(cross_table_pct)
+cat("Temp → SIF 方向:\n")
+temp_sif_index_stats <- temp_to_sif_results %>%
+  filter(!is.na(effect_index_temp_sif)) %>%
+  summarise(
+    n = n(),
+    mean = mean(effect_index_temp_sif),
+    sd = sd(effect_index_temp_sif),
+    median = median(effect_index_temp_sif),
+    min = min(effect_index_temp_sif),
+    max = max(effect_index_temp_sif),
+    n_positive = sum(effect_index_temp_sif > 0.001),
+    n_negative = sum(effect_index_temp_sif < -0.001),
+    pct_negative = round(sum(effect_index_temp_sif < -0.001) / n() * 100, 1)
+  )
 
-cat("\n【详细统计】\n\n")
+print(temp_sif_index_stats)
+cat("\n")
 
-for (cause_type in c("Temp → SIF", "SIF → Temp", "双向因果", "无显著因果")) {
-  
-  subset_data <- detailed_classification %>%
-    filter(causality_type == cause_type)
-  
-  if (nrow(subset_data) == 0) next
-  
-  cat("★", cause_type, "★\n")
-  cat("总数:", nrow(subset_data), "个站点\n")
-  
-  stats <- subset_data %>%
+if (nrow(sif_to_temp_results) > 0) {
+  cat("SIF → Temp 方向:\n")
+  sif_temp_index_stats <- sif_to_temp_results %>%
+    filter(!is.na(effect_index_sif_temp)) %>%
     summarise(
-      n_neg_sig = sum(correlation_r < 0 & correlation_p < 0.05),
-      n_pos_sig = sum(correlation_r > 0 & correlation_p < 0.05),
-      n_no_sig = sum(correlation_p >= 0.05),
-      mean_r_neg = mean(correlation_r[correlation_r < 0 & correlation_p < 0.05], 
-                        na.rm = TRUE),
-      mean_r_pos = mean(correlation_r[correlation_r > 0 & correlation_p < 0.05], 
-                        na.rm = TRUE)
+      n = n(),
+      mean = mean(effect_index_sif_temp),
+      sd = sd(effect_index_sif_temp),
+      median = median(effect_index_sif_temp),
+      min = min(effect_index_sif_temp),
+      max = max(effect_index_sif_temp)
     )
   
-  cat("  • 显著负相关:", stats$n_neg_sig, 
-      "(", round(stats$n_neg_sig/nrow(subset_data)*100, 1), "%)",
-      ifelse(is.na(stats$mean_r_neg), "", 
-             paste0(" - 平均r=", round(stats$mean_r_neg, 3))), "\n")
-  
-  cat("  • 显著正相关:", stats$n_pos_sig, 
-      "(", round(stats$n_pos_sig/nrow(subset_data)*100, 1), "%)",
-      ifelse(is.na(stats$mean_r_pos), "", 
-             paste0(" - 平均r=", round(stats$mean_r_pos, 3))), "\n")
-  
-  cat("  • 无显著相关:", stats$n_no_sig, 
-      "(", round(stats$n_no_sig/nrow(subset_data)*100, 1), "%)\n")
-  
-  cat("\n")
+  print(sif_temp_index_stats)
 }
+cat("\n")
 
 # ============================================================================
-# 7. 空间分布分析
+# 可视化
 # ============================================================================
 
-library(sf)
-library(rnaturalearth)
-library(rnaturalearthdata)
+# 效应指数分布图
+p_effect_index <- ggplot(temp_to_sif_results %>% filter(!is.na(effect_index_temp_sif)),
+                         aes(x = effect_index_temp_sif, fill = effect_type_temp_sif)) +
+  geom_histogram(bins = 40, alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +
+  geom_vline(xintercept = mean(temp_to_sif_results$effect_index_temp_sif, na.rm = TRUE),
+             linetype = "solid", color = "red", linewidth = 1) +
+  scale_fill_manual(
+    values = c("促进效应(+)" = "#4575b4",
+               "抑制效应(-)" = "#d73027",
+               "效应极弱" = "#999999",
+               "S-map失败" = "#fee090")
+  ) +
+  labs(
+    title = "效应指数分布（Temp → SIF）",
+    subtitle = paste0("平均效应指数 = ", 
+                      round(temp_sif_index_stats$mean, 4),
+                      " | 抑制效应占比 = ",
+                      temp_sif_index_stats$pct_negative, "%"),
+    x = "效应指数（S-map系数 ∂）",
+    y = "站点数",
+    fill = "效应类型",
+    caption = "负值=抑制效应（温度↑ SIF↓），正值=促进效应（温度↑ SIF↑）"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
 
-cat("=== 准备空间分析 ===\n")
+print(p_effect_index)
 
+# ============================================================================
+# 空间分布地图
+# ============================================================================
+
+cat("\n【准备空间可视化】\n")
+
+# 读取站点坐标
 station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
   rename_with(~tolower(.x)) %>%
   select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
   distinct(meteo_stat_id, .keep_all = TRUE) %>%
   mutate(meteo_stat_id = as.character(meteo_stat_id))
 
-cat("读取到", nrow(station_coords), "个站点的坐标\n")
-
-temp_to_sif_stations <- ccm_results_all %>%
-  filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
+# 合并结果和坐标
+spatial_data <- ccm_results_all %>%
   left_join(station_coords, by = "meteo_stat_id") %>%
-  filter(!is.na(longitude), !is.na(latitude)) %>%
+  filter(!is.na(longitude), !is.na(latitude))
+
+cat("有坐标的站点数:", nrow(spatial_data), "\n\n")
+
+# Temp → SIF 因果关系的站点
+spatial_temp_sif <- spatial_data %>%
+  filter(causality_direction %in% c("Temp → SIF", "双向因果")) %>%
   mutate(
-    effect_category = case_when(
-      correlation_r < 0 & correlation_p < 0.05 ~ "显著负相关",
-      correlation_r > 0 & correlation_p < 0.05 ~ "显著正相关",
-      TRUE ~ "无显著相关"
+    # 组合标签
+    combined_label = paste0(
+      case_when(
+        causality_direction == "Temp → SIF" ~ "单向",
+        causality_direction == "双向因果" ~ "双向",
+        TRUE ~ ""
+      ),
+      " - ",
+      effect_type_temp_sif
     ),
-    effect_simple = case_when(
-      correlation_r < 0 & correlation_p < 0.05 ~ "负向影响\n(温度↑ SIF↓)",
-      correlation_r > 0 & correlation_p < 0.05 ~ "正向影响\n(温度↑ SIF↑)",
-      TRUE ~ "无显著相关"
-    ),
-    effect_strength = abs(correlation_r)
+    # 效应强度（用于点的大小）
+    effect_strength = abs(effect_index_temp_sif)
   )
 
-cat("\n有温度→SIF因果关系且有坐标的站点:", nrow(temp_to_sif_stations), "\n")
-cat("  • 负向影响:", sum(temp_to_sif_stations$effect_category == "显著负相关"), "\n")
-cat("  • 正向影响:", sum(temp_to_sif_stations$effect_category == "显著正相关"), "\n")
-cat("  • 无显著相关:", sum(temp_to_sif_stations$effect_category == "无显著相关"), "\n\n")
+# 获取中国地图
+china_map <- ne_countries(country = "china", scale = "medium", returnclass = "sf")
 
-china_map <- ne_countries(country = "china", scale = "medium", 
-                          returnclass = "sf")
-
+# 地图边界
 bbox <- st_bbox(c(
-  xmin = min(temp_to_sif_stations$longitude) - 2,
-  xmax = max(temp_to_sif_stations$longitude) + 2,
-  ymin = min(temp_to_sif_stations$lat) - 2,
-  ymax = max(temp_to_sif_stations$lat) + 2
+  xmin = min(spatial_temp_sif$lon, na.rm = TRUE) - 2,
+  xmax = max(spatial_temp_sif$lon, na.rm = TRUE) + 2,
+  ymin = min(spatial_temp_sif$lat, na.rm = TRUE) - 2,
+  ymax = max(spatial_temp_sif$lat, na.rm = TRUE) + 2
 ))
 
-p_map_main <- ggplot() +
+# 主地图：因果方向 + 效应类型
+p_spatial_main <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
-  geom_point(data = temp_to_sif_stations,
-             aes(x = longitude, y = latitude, 
-                 color = effect_simple,
+  geom_point(data = spatial_temp_sif,
+             aes(x = longitude, y = latitude,
+                 color = effect_type_temp_sif,
+                 shape = causality_direction,
                  size = effect_strength),
              alpha = 0.7) +
   scale_color_manual(
     values = c(
-      "负向影响\n(温度↑ SIF↓)" = "#d73027",
-      "正向影响\n(温度↑ SIF↑)" = "#4575b4",
-      "无显著相关" = "#999999"
+      "促进效应(+)" = "#4575b4",
+      "抑制效应(-)" = "#d73027",
+      "效应极弱" = "#fdae61",
+      "S-map失败" = "#999999"
     ),
-    name = "效应方向"
+    name = "效应类型"
+  ) +
+  scale_shape_manual(
+    values = c("Temp → SIF" = 16, "双向因果" = 17),
+    name = "因果方向"
   ) +
   scale_size_continuous(
-    range = c(1, 3),
-    name = "相关强度\n|r|",
-    breaks = c(0.2, 0.4, 0.6)
+    range = c(1, 5),
+    name = "效应强度\n|∂|"
   ) +
   labs(
-    title = "热月温度异常对SIF的因果效应空间分布",
-    subtitle = paste0("有因果关系的站点 (n=", nrow(temp_to_sif_stations), 
-                      ") | Tp=1 (滞后1月) | 线性去趋势"),
+    title = "热月温度对SIF的因果效应空间分布",
+    subtitle = paste0("n=", nrow(spatial_temp_sif), 
+                      " | 抑制效应: ", sum(spatial_temp_sif$effect_type_temp_sif == "抑制效应(-)", na.rm = TRUE),
+                      " | 促进效应: ", sum(spatial_temp_sif$effect_type_temp_sif == "促进效应(+)", na.rm = TRUE)),
     x = "经度",
-    y = "纬度"
+    y = "纬度",
+    caption = "圆形=单向因果，三角形=双向因果"
   ) +
   theme_minimal() +
   theme(
     plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
     plot.subtitle = element_text(size = 12, hjust = 0.5),
     legend.position = "right",
-    panel.grid = element_line(color = "gray90", linewidth = 0.2),
     panel.background = element_rect(fill = "aliceblue", color = NA)
   )
 
-print(p_map_main)
+print(p_spatial_main)
 
-temp_to_sif_sig <- temp_to_sif_stations %>%
-  filter(effect_category != "无显著相关")
+# 分面地图：按效应类型分组
+spatial_temp_sif_sig <- spatial_temp_sif %>%
+  filter(effect_type_temp_sif %in% c("促进效应(+)", "抑制效应(-)"))
 
-if (nrow(temp_to_sif_sig) > 0) {
-  p_map_facet <- ggplot() +
+if (nrow(spatial_temp_sif_sig) > 0) {
+  p_spatial_facet <- ggplot() +
     geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
-    geom_point(data = temp_to_sif_sig,
-               aes(x = longitude, y = latitude, 
-                   color = effect_category,
+    geom_point(data = spatial_temp_sif_sig,
+               aes(x = longitude, y = latitude,
+                   color = causality_direction,
                    size = effect_strength),
                alpha = 0.7) +
     scale_color_manual(
-      values = c(
-        "显著负相关" = "#d73027",
-        "显著正相关" = "#4575b4"
-      ),
-      name = "效应类型"
+      values = c("Temp → SIF" = "#1b9e77", "双向因果" = "#d95f02"),
+      name = "因果方向"
     ) +
-    scale_size_continuous(
-      range = c(2, 6),
-      name = "|r|"
-    ) +
-    facet_wrap(~ effect_category, ncol = 2) +
+    scale_size_continuous(range = c(2, 6), name = "|∂|") +
+    coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
+             ylim = c(bbox["ymin"], bbox["ymax"])) +
+    facet_wrap(~ effect_type_temp_sif, ncol = 2) +
     labs(
-      title = "正向与负向影响的空间分布对比",
-      subtitle = paste0("显著相关的站点 (n=", nrow(temp_to_sif_sig), ")"),
+      title = "促进效应 vs 抑制效应的空间分布",
       x = "经度",
       y = "纬度"
     ) +
@@ -1231,97 +662,86 @@ if (nrow(temp_to_sif_sig) > 0) {
       panel.background = element_rect(fill = "aliceblue", color = NA)
     )
   
-  print(p_map_facet)
+  print(p_spatial_facet)
 }
 
-temp_to_sif_stations_region <- temp_to_sif_stations %>%
-  mutate(
-    region = case_when(
-      longitude < 105 ~ "西部",
-      longitude >= 105 & longitude < 115 ~ "中部",
-      TRUE ~ "东部"
-    ),
-    lat_zone = case_when(
-      lat < 30 ~ "南方",
-      lat >= 30 & lat < 40 ~ "中纬度",
-      TRUE ~ "北方"
-    )
-  )
-
-
-# ============================================================================
-# 空间分布对比：线性 vs 差分去趋势
-# ============================================================================
-
-cat("\n=== 空间分布对比：两种去趋势方法 ===\n\n")
-
-# 线性去趋势的空间数据
-temp_to_sif_linear <- ccm_results_linear %>%
-  filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-  left_join(station_coords, by = "meteo_stat_id") %>%
-  filter(!is.na(longitude), !is.na(latitude)) %>%
-  mutate(
-    effect_category = case_when(
-      correlation_r < 0 & correlation_p < 0.05 ~ "显著负相关",
-      correlation_r > 0 & correlation_p < 0.05 ~ "显著正相关",
-      TRUE ~ "无显著相关"
-    ),
-    method = "线性去趋势"
-  )
-
-# 差分去趋势的空间数据
-temp_to_sif_diff <- ccm_results_diff %>%
-  filter(causality_type %in% c("Temp → SIF", "双向因果")) %>%
-  left_join(station_coords, by = "meteo_stat_id") %>%
-  filter(!is.na(longitude), !is.na(latitude)) %>%
-  mutate(
-    effect_category = case_when(
-      correlation_r < 0 & correlation_p < 0.05 ~ "显著负相关",
-      correlation_r > 0 & correlation_p < 0.05 ~ "显著正相关",
-      TRUE ~ "无显著相关"
-    ),
-    method = "差分去趋势"
-  )
-
-cat("线性去趋势 - 空间站点数:", nrow(temp_to_sif_linear), "\n")
-cat("  负向:", sum(temp_to_sif_linear$effect_category == "显著负相关"), "\n")
-cat("  正向:", sum(temp_to_sif_linear$effect_category == "显著正相关"), "\n\n")
-
-cat("差分去趋势 - 空间站点数:", nrow(temp_to_sif_diff), "\n")
-cat("  负向:", sum(temp_to_sif_diff$effect_category == "显著负相关"), "\n")
-cat("  正向:", sum(temp_to_sif_diff$effect_category == "显著正相关"), "\n\n")
-
-# 合并两种方法的数据
-temp_to_sif_both <- bind_rows(temp_to_sif_linear, temp_to_sif_diff)
-
-# 并排对比地图
-p_spatial_compare <- ggplot() +
+# 效应指数的空间分布（连续色标）
+p_spatial_continuous <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
-  geom_point(data = temp_to_sif_both,
-             aes(x = longitude, y = latitude, 
-                 color = effect_category,
-                 size = abs(correlation_r)),
-             alpha = 0.6) +
-  scale_color_manual(
-    values = c(
-      "显著负相关" = "#d73027",
-      "显著正相关" = "#4575b4",
-      "无显著相关" = "#999999"
-    ),
-    name = "效应方向"
+  geom_point(data = spatial_temp_sif %>% filter(!is.na(effect_index_temp_sif)),
+             aes(x = lon, y = lat,
+                 color = effect_index_temp_sif,
+                 size = abs(effect_index_temp_sif)),
+             alpha = 0.7) +
+  scale_color_gradient2(
+    low = "#d73027",
+    mid = "white",
+    high = "#4575b4",
+    midpoint = 0,
+    name = "效应指数\n∂"
   ) +
-  scale_size_continuous(range = c(1, 3), name = "|r|") +
-  facet_wrap(~ method, ncol = 2) +
+  scale_size_continuous(range = c(2, 8), name = "|∂|") +
+  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
+           ylim = c(bbox["ymin"], bbox["ymax"])) +
   labs(
-    title = "空间分布对比：线性去趋势 vs 差分去趋势",
-    subtitle = "温度→SIF 因果关系的空间格局",
-    x = "经度", y = "纬度"
+    title = "效应指数（S-map系数）的空间分布",
+    subtitle = "蓝色=促进效应，红色=抑制效应",
+    x = "经度",
+    y = "纬度"
   ) +
   theme_minimal() +
   theme(
     plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    strip.text = element_text(face = "bold", size = 12),
-    legend.position = "bottom",
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "right",
     panel.background = element_rect(fill = "aliceblue", color = NA)
   )
-print(p_spatial_compare)
+
+print(p_spatial_continuous)
+
+# ============================================================================
+# 最终总结表
+# ============================================================================
+
+cat("\n", rep("=", 70), "\n", sep = "")
+cat("                   最终总结\n")
+cat(rep("=", 70), "\n\n", sep = "")
+
+summary_table <- tibble(
+  分类 = c(
+    "总站点数",
+    "有Temp→SIF因果",
+    "  - 单向因果",
+    "  - 双向因果",
+    "有SIF→Temp因果",
+    "无显著因果",
+    "",
+    "Temp→SIF效应类型:",
+    "  - 抑制效应(-)",
+    "  - 促进效应(+)",
+    "  - 效应极弱",
+    "  - S-map失败",
+    "",
+    "平均效应指数",
+    "抑制效应比例"),
+  数量 = c(
+    nrow(ccm_results_all),
+    nrow(temp_to_sif_results),
+    sum(temp_to_sif_results$causality_direction == "Temp → SIF"),
+    sum(temp_to_sif_results$causality_direction == "双向因果"),
+    nrow(sif_to_temp_results),
+    sum(ccm_results_all$causality_direction == "无显著因果"),
+    "",
+    "",
+    sum(temp_to_sif_results$effect_type_temp_sif == "抑制效应(-)", na.rm = TRUE),
+    sum(temp_to_sif_results$effect_type_temp_sif == "促进效应(+)", na.rm = TRUE),
+    sum(temp_to_sif_results$effect_type_temp_sif == "效应极弱", na.rm = TRUE),
+    sum(temp_to_sif_results$effect_type_temp_sif == "S-map失败", na.rm = TRUE),
+    "",
+    round(temp_sif_index_stats$mean, 4),
+    paste0(temp_sif_index_stats$pct_negative, "%")
+  )
+)
+
+print(summary_table)
+
