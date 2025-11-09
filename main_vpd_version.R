@@ -49,16 +49,14 @@ meteo_data_lin <- map(
 
 # ============================================================================
 # 计算VPD（参考Yuan et al. 2019）
-# ============================================================================
-
-cat("\n=== 计算VPD ===\n")
-
 # 根据论文方法计算VPD
 meteo_data_with_vpd <- meteo_data_lin %>%
   mutate(
     # 1. 计算饱和水汽压 SVP (kPa)
     # Buck方程: SVP = 0.61121 * exp((17.67*T)/(T+243.5))
-    svp = 0.61121 * exp((17.67 * tavg) / (tavg + 243.5)),
+    p_mst = 1013.25 * ((tavg + 273.16) / (tavg + 273.16 + 0.0065 * 0))^5.625, 
+    f_w = 1 + 7 * 10^(-4) + 3.46 * 10^(-6) * p_mst, 
+    svp = 6.112 * f_w * exp((17.67 * tavg) / (tavg + 243.5)),
     
     # 2. 计算实际水汽压 AVP (kPa)
     # AVP = (RH/100) * SVP
@@ -76,10 +74,7 @@ meteo_data_with_vpd <- meteo_data_lin %>%
       TRUE ~ vpd
     )
   )
-
-cat("VPD计算完成\n")
-cat("VPD范围: [", round(min(meteo_data_with_vpd$vpd, na.rm = TRUE), 3), ", ",
-    round(max(meteo_data_with_vpd$vpd, na.rm = TRUE), 3), "] kPa\n")
+hist(meteo_data_with_vpd$vpd)
 cat("VPD平均值:", round(mean(meteo_data_with_vpd$vpd, na.rm = TRUE), 3), "kPa\n\n")
 
 # 合并所有数据
@@ -450,11 +445,6 @@ cat("\n成功分析的站点数:", nrow(ccm_results_all), "/", length(all_statio
 
 # ============================================================================
 # 统计结果
-# ============================================================================
-
-cat("\n", rep("=", 70), "\n", sep = "")
-cat("                   统计结果\n")
-cat(rep("=", 70), "\n\n", sep = "")
 
 # Temp → SIF
 cat("【Temp → SIF】\n")
