@@ -624,166 +624,325 @@ for (ver in c("P80", "Literature")) {
 }
 
 # ============================================================================
-# 8. 与经济发展指标的关系
+# 8. 经济数据分析（简化版）
 # ============================================================================
 
 cat("\n【8. 因果关系与经济发展指标的关系】\n\n")
 
-# 读取GDP/经济数据（需要你提供数据文件）
-# 这里我提供一个示例框架
+# ----------------------------------------------------------------------------
+# 8.1 读取并准备数据
+# ----------------------------------------------------------------------------
 
-# 示例：创建模拟的经济数据
-# 实际使用时，替换为真实数据
-economic_data <- station_coords %>%
+cat("读取空间和经济数据...\n")
+
+# 读取城市shapefile
+china_cities_shp <- st_read("data_raw/china_cities/city.shp", quiet = TRUE) %>%
+  st_transform(crs = 4326)
+
+# 读取GDP数据
+gdp_data <- readxl::read_excel("data_raw/中国城市数据库1990-2023.xlsx") %>%
+  filter(年份 == 2020) %>%
+  select(
+    city_name = 城市,
+    gdp_per_capita = "人均地区生产总值(元)",
+    gdp_total = "地区生产总值(万元)"  # 总GDP（单位：亿元）
+  ) %>%
   mutate(
-    # 这里应该从真实数据源读取
-    # 示例：根据经纬度估算（仅用于演示）
-    gdp_per_capita = case_when(
-      longitude > 110 & latitude > 30 ~ rnorm(n(), 80000, 20000),  # 东部发达
-      longitude > 105 ~ rnorm(n(), 50000, 15000),  # 中部
-      TRUE ~ rnorm(n(), 30000, 10000)  # 西部
-    ),
-    urbanization_rate = case_when(
-      longitude > 110 & latitude > 30 ~ runif(n(), 0.6, 0.9),
-      longitude > 105 ~ runif(n(), 0.4, 0.7),
-      TRUE ~ runif(n(), 0.2, 0.5)
-    )
+    gdp_per_capita = as.numeric(gdp_per_capita),
+    gdp_total = as.numeric(gdp_total)
   )
 
-# 如果有真实数据，使用以下代码读取：
-# economic_data <- read_csv("data_raw/economic_indicators.csv") %>%
-#   rename_with(~tolower(.x)) %>%
-#   mutate(meteo_stat_id = as.character(meteo_stat_id))
+cat("GDP数据:", nrow(gdp_data), "个城市\n")
 
-# 合并数据
+# 空间匹配站点到城市
+stations_sf <- station_coords %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+stations_with_city <- stations_sf %>%
+  st_join(china_cities_shp, join = st_within) %>%
+  as.data.frame() %>%
+  select(-geometry) %>%
+  rename(
+    city_code = ct_adcode,
+    city_name = ct_name,
+    province_name = pr_name
+  )
+
+# 合并所有数据
+economic_data <- station_coords %>%
+  left_join(stations_with_city, by = "meteo_stat_id") %>%
+  left_join(gdp_data, by = "city_name") %>%
+  select(meteo_stat_id, longitude, latitude, city_name, province_name,
+         gdp_per_capita, gdp_total)
+
 spatial_econ <- spatial_results %>%
   left_join(economic_data, by = c("meteo_stat_id", "longitude", "latitude"))
 
-# 为两个版本分别分析
-for (ver in c("P80", "Literature")) {
-  
-  cat("【", ver, "版本 - 经济指标分析】\n\n", sep = "")
-  
-  ver_econ <- spatial_econ %>% filter(version == ver)
-  
-  # 按因果类型统计经济指标
-  econ_by_causality <- ver_econ %>%
-    filter(!is.na(gdp_per_capita)) %>%
-    group_by(combined_label) %>%
-    summarise(
-      站点数 = n(),
-      平均GDP = round(mean(gdp_per_capita, na.rm = TRUE), 0),
-      GDP标准差 = round(sd(gdp_per_capita, na.rm = TRUE), 0),
-      平均城镇化率 = round(mean(urbanization_rate, na.rm = TRUE) * 100, 1),
-      .groups = "drop"
-    ) %>%
-    arrange(desc(站点数))
-  
-  cat("因果类型与经济指标:\n")
-  print(econ_by_causality)
-  cat("\n")
-  
-  # 箱线图：GDP vs 因果类型
-  p_gdp_box <- ver_econ %>%
-    filter(!is.na(gdp_per_capita),
-           combined_label %in% c("热影响促进SIF", "热影响抑制SIF", "无因果")) %>%
-    ggplot(aes(x = combined_label, y = gdp_per_capita, fill = combined_label)) +
-    geom_boxplot(alpha = 0.7, outlier.alpha = 0.5) +
-    geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+cat("合并完成，有GDP数据的站点:", 
+    sum(!is.na(spatial_econ$gdp_per_capita)), "\n\n")
+
+# ----------------------------------------------------------------------------
+# 8.2 核心可视化函数
+# ----------------------------------------------------------------------------
+
+# 通用GDP分级函数
+categorize_gdp <- function(data, gdp_column, breaks, labels) {
+  data %>%
+    mutate(
+      gdp_category = cut(
+        .data[[gdp_column]],
+        breaks = breaks,
+        labels = labels,
+        include.lowest = TRUE
+      )
+    )
+}
+
+# 生成堆积条形图
+plot_stacked_bar <- function(data, title_suffix, gdp_type) {
+  data %>%
+    filter(combined_label != "其他", !is.na(gdp_category)) %>%
+    count(gdp_category, combined_label) %>%
+    ggplot(aes(x = gdp_category, y = n, fill = combined_label)) +
+    geom_col(position = "fill") +
     scale_fill_manual(
       values = c(
         "热影响促进SIF" = "#4575b4",
         "热影响抑制SIF" = "#d73027",
+        "双向-促进" = "#91bfdb",
+        "双向-抑制" = "#fc8d59",
+        "SIF→热影响" = "#984ea3",
         "无因果" = "#999999"
-      ),
-      guide = "none"
-    ) +
-    scale_y_continuous(labels = scales::comma) +
-    labs(
-      title = paste0("因果类型与人均GDP的关系 (", ver, ")"),
-      x = "因果类型",
-      y = "人均GDP (元)",
-      caption = "方框 = 四分位数；点 = 单个站点"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
-      axis.text.x = element_text(angle = 15, hjust = 1)
-    )
-  print(p_gdp_box)
-  散点图：GDP vs 效应强度
-  p_gdp_scatter <- ver_econ %>%
-    filter(!is.na(gdp_per_capita), !is.na(effect_index),
-           combined_label %in% c("热影响促进SIF", "热影响抑制SIF")) %>%
-    ggplot(aes(x = gdp_per_capita, y = effect_index, color = combined_label)) +
-    geom_point(alpha = 0.6, size = 3) +
-    geom_smooth(method = "lm", se = TRUE, linewidth = 1.2) +
-    scale_color_manual(
-      values = c(
-        "热影响促进SIF" = "#4575b4",
-        "热影响抑制SIF" = "#d73027"
       ),
       name = "因果类型"
     ) +
-    scale_x_continuous(labels = scales::comma) +
+    scale_y_continuous(labels = scales::percent) +
     labs(
-      title = paste0("GDP与热影响效应强度的关系 (", ver, ")"),
-      x = "人均GDP (元)",
-      y = "效应指数 (S-map系数)",
-      caption = paste0("相关系数: ",
-                       "促进 r=", round(cor(
-                         ver_econgdppercapita[verecongdp_per_capita[ver_econ
-                                                                    gdpp​erc​apita[vere​concombined_label == "热影响促进SIF"],
-                                                                    ver_econeffectindex[vereconeffect_index[ver_econ
-                                                                                                            effecti​ndex[vere​concombined_label == "热影响促进SIF"],
-                                                                                                            use = "complete.obs"
-                       ), 3),
-                       " | 抑制 r=", round(cor(
-                         ver_econgdppercapita[verecongdp_per_capita[ver_econ
-                                                                    gdpp​erc​apita[vere​concombined_label == "热影响抑制SIF"],
-                                                                    ver_econeffectindex[vereconeffect_index[ver_econ
-                                                                                                            effecti​ndex[vere​concombined_label == "热影响抑制SIF"],
-                                                                                                            use = "complete.obs"
-                       ), 3))
+      title = paste0("不同", gdp_type, "水平下的因果类型分布 ", title_suffix),
+      x = paste0(gdp_type, "类别"),
+      y = "比例 (%)"
     ) +
     theme_minimal() +
     theme(
-      plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
-      legend.position = "bottom"
+      plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+      axis.text.x = element_text(angle = 30, hjust = 1),
+      legend.position = "right"
     )
-  
-  print(p_gdp_scatter)
-  城镇化率分析
-  p_urban_box <- ver_econ %>%
-    filter(!is.na(urbanization_rate),
-           combined_label %in% c("热影响促进SIF", "热影响抑制SIF", "无因果")) %>%
-    ggplot(aes(x = combined_label, y = urbanization_rate * 100, fill = combined_label)) +
-    geom_boxplot(alpha = 0.7, outlier.alpha = 0.5) +
-    geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+}
+
+# 生成箱线图
+plot_boxplot <- function(data, gdp_column, title_suffix, gdp_type, y_label) {
+  data %>%
+    filter(combined_label %in% c("热影响促进SIF", "热影响抑制SIF", 
+                                 "双向-促进", "双向-抑制", "无因果"),
+           !is.na(.data[[gdp_column]])) %>%
+    ggplot(aes(x = reorder(combined_label, -.data[[gdp_column]], FUN = median), 
+               y = .data[[gdp_column]],
+               fill = combined_label)) +
+    geom_boxplot(alpha = 0.7, outlier.alpha = 0.5, outlier.size = 1) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 0.8) +
     scale_fill_manual(
       values = c(
         "热影响促进SIF" = "#4575b4",
         "热影响抑制SIF" = "#d73027",
+        "双向-促进" = "#91bfdb",
+        "抑制" = "#fc8d59",
         "无因果" = "#999999"
       ),
       guide = "none"
     ) +
     labs(
-      title = paste0("因果类型与城镇化率的关系 (", ver, ")"),
+      title = paste0("因果类型与", gdp_type, "的关系 ", title_suffix),
       x = "因果类型",
-      y = "城镇化率 (%)"
+      y = y_label
     ) +
     theme_minimal() +
     theme(
-      plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
-      axis.text.x = element_text(angle = 15, hjust = 1)
+      plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+      axis.text.x = element_text(angle = 20, hjust = 1, size = 9)
     )
-  print(p_urban_box)
-  统计检验
-  if (sum(!is.na(ver_econ$gdp_per_capita)) > 0) {
-    cat("ANOVA检验 - GDP差异:\n")
-    anova_result <- aov(gdp_per_capita ~ combined_label,
-                        data = ver_econ %>%
-                          filter(combined_label %in% c("热影响促进SIF", "热影响抑制SIF", "无因果")))
-    print(summary(anova_result))
+}
+
+# ----------------------------------------------------------------------------
+# 8.3 按版本分析
+# ----------------------------------------------------------------------------
+
+for (ver in c("P80", "Literature")) {
+  
+  cat(rep("=", 70), "\n", sep = "")
+  cat("【", ver, "版本分析】\n", sep = "")
+  cat(rep("=", 70), "\n\n", sep = "")
+  
+  ver_econ <- spatial_econ %>%
+    filter(version == ver, !is.na(gdp_per_capita) | !is.na(gdp_total))
+  
+  if (nrow(ver_econ) == 0) {
+    cat("警告: 无有效数据\n\n")
+    next
+  }
+  
+  threshold_val <- ifelse(ver == "P80", VPD_THRESHOLD_P80, VPD_THRESHOLD_ABS)
+  title_suffix <- paste0("(", ver, ", VPD阈值=", round(threshold_val, 2), " kPa)")
+  
+  # ========================================================================
+  # A. 人均GDP分析
+  # ========================================================================
+  
+  cat("【人均GDP分析】\n\n")
+  
+  ver_econ_percapita <- ver_econ %>%
+    filter(!is.na(gdp_per_capita))
+  
+  if (nrow(ver_econ_percapita) > 0) {
+    
+    # 统计摘要
+    cat("人均GDP统计:\n")
+    summary_stats <- ver_econ_percapita %>%
+      group_by(combined_label) %>%
+      summarise(
+        站点数 = n(),
+        平均GDP_万元 = round(mean(gdp_per_capita) / 10000, 2),
+        中位GDP_万元 = round(median(gdp_per_capita) / 10000, 2),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(站点数))
+    
+    print(summary_stats)
     cat("\n")
+    
+    # GDP分级
+    ver_econ_percapita_cat <- categorize_gdp(
+      ver_econ_percapita,
+      "gdp_per_capita",
+      breaks = c(0, 40000, 80000, 120000, Inf),
+      labels = c("低(<4万)", "中(4-8万)", "较高(8-12万)", "高(>12万)")
+    )
+    
+    # 分级统计
+    cat("人均GDP分级统计:\n")
+    gdp_cat_stats <- ver_econ_percapita_cat %>%
+      group_by(gdp_category, combined_label) %>%
+      summarise(站点数 = n(), .groups = "drop") %>%
+      pivot_wider(names_from = combined_label, 
+                  values_from = 站点数, 
+                  values_fill = 0)
+    print(gdp_cat_stats)
+    cat("\n")
+    
+    # 图1：堆积条形图
+    p1 <- plot_stacked_bar(ver_econ_percapita_cat, title_suffix, "人均GDP")
+    print(p1)
+    
+    # 图2：箱线图
+    ver_econ_percapita_plot <- ver_econ_percapita %>%
+      mutate(gdp_per_capita_万元 = gdp_per_capita / 10000)
+    
+    p2 <- plot_boxplot(
+      ver_econ_percapita_plot, 
+      "gdp_per_capita_万元",
+      title_suffix, 
+      "人均GDP", 
+      "人均GDP (万元)"
+    )
+    print(p2)
+    
+    # 统计检验
+    cat("\n统计检验:\n")
+    test_data <- ver_econ_percapita %>%
+      filter(combined_label %in% c("热影响促进SIF", "热影响抑制SIF", "无因果"))
+    
+    if (nrow(test_data) > 10 && length(unique(test_data$combined_label)) >= 2) {
+      kw_result <- kruskal.test(gdp_per_capita ~ combined_label, data = test_data)
+      cat("Kruskal-Wallis检验: χ² =", round(kw_result$statistic, 3), 
+          ", p =", format.pval(kw_result$p.value, digits = 3), "\n")
+    }
+    cat("\n")
+  }
+  
+  # ========================================================================
+  # B. 总GDP分析
+  # ========================================================================
+  
+  cat("【总GDP分析】\n\n")
+  
+  ver_econ_total <- ver_econ %>%
+    filter(!is.na(gdp_total))
+  
+  if (nrow(ver_econ_total) > 0) {
+    
+    # 统计摘要
+    cat("总GDP统计:\n")
+    summary_stats_total <- ver_econ_total %>%
+      group_by(combined_label) %>%
+      summarise(
+        站点数 = n(),
+        平均GDP_亿元 = round(mean(gdp_total), 2),
+        中位GDP_亿元 = round(median(gdp_total), 2),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(站点数))
+    
+    print(summary_stats_total)
+    cat("\n")
+    
+    # GDP分级（根据总GDP的实际分布调整）
+    gdp_total_quantiles <- quantile(ver_econ_total$gdp_total, 
+                                    probs = c(0, 0.25, 0.5, 0.75, 1), 
+                                    na.rm = TRUE)
+    
+    ver_econ_total_cat <- categorize_gdp(
+      ver_econ_total,
+      "gdp_total",
+      breaks = gdp_total_quantiles,
+      labels = c("低(Q1)", "中(Q2)", "较高(Q3)", "高(Q4)")
+    )
+    
+    # 分级统计
+    cat("总GDP分级统计 (按四分位数):\n")
+    cat("  Q1 (<", round(gdp_total_quantiles[2], 1), "亿元)\n", sep = "")
+    cat("  Q2 (", round(gdp_total_quantiles[2], 1), "-", 
+        round(gdp_total_quantiles[3], 1), "亿元)\n", sep = "")
+    cat("  Q3 (", round(gdp_total_quantiles[3], 1), "-", 
+        round(gdp_total_quantiles[4], 1), "亿元)\n", sep = "")
+    cat("  Q4 (>", round(gdp_total_quantiles[4], 1), "亿元)\n\n", sep = "")
+    
+    gdp_total_cat_stats <- ver_econ_total_cat %>%
+      group_by(gdp_category, combined_label) %>%
+      summarise(站点数 = n(), .groups = "drop") %>%
+      pivot_wider(names_from = combined_label, 
+                  values_from = 站点数, 
+                  values_fill = 0)
+    print(gdp_total_cat_stats)
+    cat("\n")
+    
+    # 图3：堆积条形图
+    p3 <- plot_stacked_bar(ver_econ_total_cat, title_suffix, "总GDP")
+    print(p3)
+    
+    # 图4：箱线图
+    p4 <- plot_boxplot(
+      ver_econ_total, 
+      "gdp_total",
+      title_suffix, 
+      "总GDP", 
+      "总GDP (亿元)"
+    )
+    print(p4)
+    
+    # 统计检验
+    cat("\n统计检验:\n")
+    test_data_total <- ver_econ_total %>%
+      filter(combined_label %in% c("热影响促进SIF", "热影响抑制SIF", "无因果"))
+    
+    if (nrow(test_data_total) > 10 && length(unique(test_data_total$combined_label)) >= 2) {
+      kw_result_total <- kruskal.test(gdp_total ~ combined_label, data = test_data_total)
+      cat("Kruskal-Wallis检验: χ² =", round(kw_result_total$statistic, 3), 
+          ", p =", format.pval(kw_result_total$p.value, digits = 3), "\n")
+    }
+    cat("\n")
+  }
+  
+  cat(rep("-", 70), "\n\n", sep = "")
+}
+
