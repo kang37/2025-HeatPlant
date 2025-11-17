@@ -748,3 +748,488 @@ p_comparison_sidebyside <- ggplot() +
 
 print(p_comparison_sidebyside)
 
+# ============================================================================
+# 4. 经济数据关联分析
+# ============================================================================
+
+cat("\n【4. VPD-SIF因果关系与经济发展指标的关系】\n\n")
+
+# ----------------------------------------------------------------------------
+# 4.1 读取并准备经济数据
+# ----------------------------------------------------------------------------
+
+cat("读取经济和空间数据...\n")
+
+# 读取城市shapefile
+china_cities_shp <- st_read("data_raw/china_cities/city.shp", quiet = TRUE) %>%
+  st_transform(crs = 4326)
+
+# 读取GDP数据
+gdp_data <- readxl::read_excel("data_raw/中国城市数据库1990-2023.xlsx") %>%
+  filter(年份 == 2020) %>%
+  select(
+    city_name = 城市,
+    gdp_per_capita = "人均地区生产总值(元)",
+    gdp_total = "地区生产总值(万元)"
+  ) %>%
+  mutate(
+    gdp_per_capita = as.numeric(gdp_per_capita),
+    gdp_total = as.numeric(gdp_total)
+  )
+
+# 空间匹配站点到城市
+stations_sf <- station_coords %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+stations_with_city <- stations_sf %>%
+  st_join(china_cities_shp, join = st_within) %>%
+  as.data.frame() %>%
+  select(-geometry) %>%
+  rename(
+    city_code = ct_adcode,
+    city_name = ct_name,
+    province_name = pr_name
+  )
+
+# 合并所有数据
+economic_data <- station_coords %>%
+  left_join(stations_with_city, by = "meteo_stat_id") %>%
+  left_join(gdp_data, by = "city_name") %>%
+  select(meteo_stat_id, longitude, latitude, city_name, province_name,
+         gdp_per_capita, gdp_total)
+
+# 合并CCM结果和经济数据
+spatial_econ <- spatial_data %>%
+  left_join(economic_data, by = c("meteo_stat_id", "longitude", "latitude"))
+
+cat("有GDP数据的站点:", sum(!is.na(spatial_econ$gdp_per_capita)), "\n\n")
+
+# ----------------------------------------------------------------------------
+# 4.2 创建综合因果标签
+# ----------------------------------------------------------------------------
+
+spatial_econ <- spatial_econ %>%
+  mutate(
+    # VPD因果标签
+    vpd_causality = case_when(
+      !vpd_causes_sif ~ "无因果",
+      effect_type_vpd_sif == "促进效应(+)" ~ "VPD促进SIF",
+      effect_type_vpd_sif == "抑制效应(-)" ~ "VPD抑制SIF",
+      TRUE ~ "效应不明"
+    ),
+    
+    # Temp因果标签
+    temp_causality = case_when(
+      !temp_causes_sif ~ "无因果",
+      effect_type_temp_sif == "促进效应(+)" ~ "Temp促进SIF",
+      effect_type_temp_sif == "抑制效应(-)" ~ "Temp抑制SIF",
+      TRUE ~ "效应不明"
+    ),
+    
+    # 综合驱动因子
+    driver_type = case_when(
+      temp_causes_sif & vpd_causes_sif ~ "双因子驱动",
+      temp_causes_sif ~ "仅温度驱动",
+      vpd_causes_sif ~ "仅VPD驱动",
+      TRUE ~ "无驱动"
+    )
+  )
+
+# ----------------------------------------------------------------------------
+# 4.3 通用可视化函数
+# ----------------------------------------------------------------------------
+
+# GDP分级函数
+categorize_gdp <- function(data, gdp_column, breaks, labels) {
+  data %>%
+    mutate(
+      gdp_category = cut(
+        .data[[gdp_column]],
+        breaks = breaks,
+        labels = labels,
+        include.lowest = TRUE
+      )
+    )
+}
+
+# 堆积条形图
+plot_stacked_bar <- function(data, causality_col, title_text, gdp_type) {
+  data %>%
+    filter(.data[[causality_col]] != "效应不明", !is.na(gdp_category)) %>%
+    count(gdp_category, .data[[causality_col]]) %>%
+    ggplot(aes(x = gdp_category, y = n, fill = .data[[causality_col]])) +
+    geom_col(position = "fill") +
+    scale_fill_manual(
+      values = c(
+        "VPD促进SIF" = "#4575b4",
+        "VPD抑制SIF" = "#d73027",
+        "Temp促进SIF" = "#91cf60",
+        "Temp抑制SIF" = "#fc8d59",
+        "无因果" = "#999999"
+      ),
+      name = "因果类型"
+    ) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+      title = title_text,
+      subtitle = paste0("不同", gdp_type, "水平下的因果类型分布"),
+      x = paste0(gdp_type, "类别"),
+      y = "比例 (%)"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
+      axis.text.x = element_text(angle = 30, hjust = 1),
+      legend.position = "right"
+    )
+}
+
+# 箱线图
+plot_boxplot_econ <- function(data, causality_col, gdp_column, title_text, y_label) {
+  data %>%
+    filter(.data[[causality_col]] %in% c("VPD促进SIF", "VPD抑制SIF", "Temp促进SIF", "Temp抑制SIF", "无因果"),
+           !is.na(.data[[gdp_column]])) %>%
+    ggplot(aes(x = reorder(.data[[causality_col]], -.data[[gdp_column]], FUN = median), 
+               y = .data[[gdp_column]],
+               fill = .data[[causality_col]])) +
+    geom_boxplot(alpha = 0.7, outlier.alpha = 0.5, outlier.size = 1) +
+    geom_jitter(width = 0.2, alpha = 0.2, size = 0.8) +
+    scale_fill_manual(
+      values = c(
+        "VPD促进SIF" = "#4575b4",
+        "VPD抑制SIF" = "#d73027",
+        "Temp促进SIF" = "#91cf60",
+        "Temp抑制SIF" = "#fc8d59",
+        "无因果" = "#999999"
+      ),
+      guide = "none"
+    ) +
+    labs(
+      title = title_text,
+      x = "因果类型",
+      y = y_label
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+      axis.text.x = element_text(angle = 20, hjust = 1, size = 9)
+    )
+}
+
+# ----------------------------------------------------------------------------
+# 4.4 VPD-SIF关系与经济分析
+# ----------------------------------------------------------------------------
+
+cat(rep("=", 70), "\n", sep = "")
+cat("【VPD-SIF因果关系与经济指标分析】\n")
+cat(rep("=", 70), "\n\n", sep = "")
+
+# 过滤有效数据
+spatial_econ_valid <- spatial_econ %>%
+  filter(!is.na(gdp_per_capita) | !is.na(gdp_total))
+
+if (nrow(spatial_econ_valid) == 0) {
+  cat("警告: 无有效经济数据\n\n")
+} else {
+  
+  # === A. 人均GDP分析 ===
+  cat("【A. 人均GDP与VPD-SIF因果关系】\n\n")
+  
+  spatial_econ_percapita <- spatial_econ_valid %>%
+    filter(!is.na(gdp_per_capita))
+  
+  if (nrow(spatial_econ_percapita) > 0) {
+    
+    # 统计表
+    cat("1. VPD因果类型的经济统计:\n")
+    vpd_gdp_stats <- spatial_econ_percapita %>%
+      group_by(vpd_causality) %>%
+      summarise(
+        站点数 = n(),
+        平均GDP_万元 = round(mean(gdp_per_capita) / 10000, 2),
+        中位GDP_万元 = round(median(gdp_per_capita) / 10000, 2),
+        GDP标准差_万元 = round(sd(gdp_per_capita) / 10000, 2),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(站点数))
+    
+    print(vpd_gdp_stats)
+    cat("\n")
+    
+    # 对比Temp因果类型
+    cat("2. Temp因果类型的经济统计:\n")
+    temp_gdp_stats <- spatial_econ_percapita %>%
+      group_by(temp_causality) %>%
+      summarise(
+        站点数 = n(),
+        平均GDP_万元 = round(mean(gdp_per_capita) / 10000, 2),
+        中位GDP_万元 = round(median(gdp_per_capita) / 10000, 2),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(站点数))
+    
+    print(temp_gdp_stats)
+    cat("\n")
+    
+    # GDP分级
+    spatial_econ_percapita_cat <- categorize_gdp(
+      spatial_econ_percapita,
+      "gdp_per_capita",
+      breaks = c(0, 40000, 80000, 120000, Inf),
+      labels = c("低(<4万)", "中(4-8万)", "较高(8-12万)", "高(>12万)")
+    )
+    
+    # 图1: VPD堆积条形图
+    p1_vpd <- plot_stacked_bar(
+      spatial_econ_percapita_cat,
+      "vpd_causality",
+      "VPD-SIF因果关系",
+      "人均GDP"
+    )
+    print(p1_vpd)
+    
+    # 图2: Temp堆积条形图（对比）
+    p1_temp <- plot_stacked_bar(
+      spatial_econ_percapita_cat,
+      "temp_causality",
+      "Temp-SIF因果关系",
+      "人均GDP"
+    )
+    print(p1_temp)
+    
+    # 图3: VPD箱线图
+    spatial_econ_percapita_plot <- spatial_econ_percapita %>%
+      mutate(gdp_per_capita_万元 = gdp_per_capita / 10000)
+    
+    p2_vpd <- plot_boxplot_econ(
+      spatial_econ_percapita_plot,
+      "vpd_causality",
+      "gdp_per_capita_万元",
+      "VPD-SIF因果类型与人均GDP",
+      "人均GDP (万元)"
+    )
+    print(p2_vpd)
+    
+    # 图4: Temp箱线图（对比）
+    p2_temp <- plot_boxplot_econ(
+      spatial_econ_percapita_plot,
+      "temp_causality",
+      "gdp_per_capita_万元",
+      "Temp-SIF因果类型与人均GDP",
+      "人均GDP (万元)"
+    )
+    print(p2_temp)
+    
+    # 统计检验
+    cat("\n3. 统计检验:\n")
+    
+    # VPD检验
+    test_vpd <- spatial_econ_percapita %>%
+      filter(vpd_causality %in% c("VPD促进SIF", "VPD抑制SIF", "无因果"))
+    
+    if (nrow(test_vpd) > 10 && length(unique(test_vpd$vpd_causality)) >= 2) {
+      kw_vpd <- kruskal.test(gdp_per_capita ~ vpd_causality, data = test_vpd)
+      cat("  VPD因果: χ² =", round(kw_vpd$statistic, 3), 
+          ", p =", format.pval(kw_vpd$p.value, digits = 3), "\n")
+    }
+    
+    # Temp检验
+    test_temp <- spatial_econ_percapita %>%
+      filter(temp_causality %in% c("Temp促进SIF", "Temp抑制SIF", "无因果"))
+    
+    if (nrow(test_temp) > 10 && length(unique(test_temp$temp_causality)) >= 2) {
+      kw_temp <- kruskal.test(gdp_per_capita ~ temp_causality, data = test_temp)
+      cat("  Temp因果: χ² =", round(kw_temp$statistic, 3), 
+          ", p =", format.pval(kw_temp$p.value, digits = 3), "\n")
+    }
+    cat("\n")
+  }
+  
+  # === B. 总GDP分析 ===
+  cat("【B. 总GDP与VPD-SIF因果关系】\n\n")
+  
+  spatial_econ_total <- spatial_econ_valid %>%
+    filter(!is.na(gdp_total))
+  
+  if (nrow(spatial_econ_total) > 0) {
+    
+    # 统计表
+    cat("1. VPD因果类型的总GDP统计:\n")
+    vpd_gdp_total_stats <- spatial_econ_total %>%
+      group_by(vpd_causality) %>%
+      summarise(
+        站点数 = n(),
+        平均GDP_亿元 = round(mean(gdp_total), 2),
+        中位GDP_亿元 = round(median(gdp_total), 2),
+        .groups = "drop"
+      ) %>%
+      arrange(desc(站点数))
+    
+    print(vpd_gdp_total_stats)
+    cat("\n")
+    
+    # GDP分级（四分位数）
+    gdp_total_quantiles <- quantile(spatial_econ_total$gdp_total, 
+                                    probs = c(0, 0.25, 0.5, 0.75, 1), 
+                                    na.rm = TRUE)
+    
+    spatial_econ_total_cat <- categorize_gdp(
+      spatial_econ_total,
+      "gdp_total",
+      breaks = gdp_total_quantiles,
+      labels = c("低(Q1)", "中(Q2)", "较高(Q3)", "高(Q4)")
+    )
+    
+    cat("总GDP分级 (按四分位数):\n")
+    cat("  Q1: <", round(gdp_total_quantiles[2], 1), "亿元\n", sep = "")
+    cat("  Q2: ", round(gdp_total_quantiles[2], 1), "-", 
+        round(gdp_total_quantiles[3], 1), "亿元\n", sep = "")
+    cat("  Q3: ", round(gdp_total_quantiles[3], 1), "-", 
+        round(gdp_total_quantiles[4], 1), "亿元\n", sep = "")
+    cat("  Q4: >", round(gdp_total_quantiles[4], 1), "亿元\n\n", sep = "")
+    
+    # 图5: VPD堆积条形图
+    p3_vpd <- plot_stacked_bar(
+      spatial_econ_total_cat,
+      "vpd_causality",
+      "VPD-SIF因果关系",
+      "总GDP"
+    )
+    print(p3_vpd)
+    
+    # 图6: Temp堆积条形图
+    p3_temp <- plot_stacked_bar(
+      spatial_econ_total_cat,
+      "temp_causality",
+      "Temp-SIF因果关系",
+      "总GDP"
+    )
+    print(p3_temp)
+    
+    # 图7: VPD箱线图
+    p4_vpd <- plot_boxplot_econ(
+      spatial_econ_total,
+      "vpd_causality",
+      "gdp_total",
+      "VPD-SIF因果类型与总GDP",
+      "总GDP (亿元)"
+    )
+    print(p4_vpd)
+    
+    # 图8: Temp箱线图
+    p4_temp <- plot_boxplot_econ(
+      spatial_econ_total,
+      "temp_causality",
+      "gdp_total",
+      "Temp-SIF因果类型与总GDP",
+      "总GDP (亿元)"
+    )
+    print(p4_temp)
+    
+    # 统计检验
+    cat("\n2. 统计检验:\n")
+    
+    test_vpd_total <- spatial_econ_total %>%
+      filter(vpd_causality %in% c("VPD促进SIF", "VPD抑制SIF", "无因果"))
+    
+    if (nrow(test_vpd_total) > 10) {
+      kw_vpd_total <- kruskal.test(gdp_total ~ vpd_causality, data = test_vpd_total)
+      cat("  VPD因果: χ² =", round(kw_vpd_total$statistic, 3), 
+          ", p =", format.pval(kw_vpd_total$p.value, digits = 3), "\n")
+    }
+    cat("\n")
+  }
+  
+  # === C. 驱动因子对比分析 ===
+  cat("【C. 双因子驱动分析】\n\n")
+  
+  driver_gdp_stats <- spatial_econ_percapita %>%
+    group_by(driver_type) %>%
+    summarise(
+      站点数 = n(),
+      平均GDP_万元 = round(mean(gdp_per_capita) / 10000, 2),
+      中位GDP_万元 = round(median(gdp_per_capita) / 10000, 2),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(站点数))
+  
+  cat("驱动因子类型的经济统计:\n")
+  print(driver_gdp_stats)
+  cat("\n")
+  
+  # 图9: 驱动因子箱线图
+  p5_driver <- spatial_econ_percapita %>%
+    mutate(gdp_per_capita_万元 = gdp_per_capita / 10000) %>%
+    filter(driver_type != "无驱动") %>%
+    ggplot(aes(x = reorder(driver_type, -gdp_per_capita_万元, FUN = median),
+               y = gdp_per_capita_万元,
+               fill = driver_type)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.3, size = 0.8) +
+    scale_fill_manual(
+      values = c(
+        "仅温度驱动" = "#fc8d59",
+        "仅VPD驱动" = "#4575b4",
+        "双因子驱动" = "#4daf4a"
+      ),
+      guide = "none"
+    ) +
+    labs(
+      title = "驱动因子类型与人均GDP的关系",
+      subtitle = "比较单一驱动 vs 双因子驱动",
+      x = "驱动因子类型",
+      y = "人均GDP (万元)"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5)
+    )
+  
+  print(p5_driver)
+  
+  # === D. 空间地图：叠加GDP ===
+  cat("\n【D. GDP空间分布图】\n")
+  
+  p_gdp_spatial_vpd <- ggplot() +
+    geom_sf(data = china_cities_shp, fill = "gray95", color = "gray70", 
+            linewidth = 0.2, alpha = 0.3) +
+    geom_point(
+      data = spatial_econ_percapita,
+      aes(x = longitude, y = latitude,
+          size = gdp_per_capita / 10000,
+          color = vpd_causality),
+      alpha = 0.7
+    ) +
+    scale_color_manual(
+      values = c(
+        "VPD促进SIF" = "#4575b4",
+        "VPD抑制SIF" = "#d73027",
+        "无因果" = "#999999",
+        "效应不明" = "#fee090"
+      ),
+      name = "VPD因果类型"
+    ) +
+    scale_size_continuous(
+      range = c(1, 10), 
+      name = "人均GDP\n(万元)"
+    ) +
+    labs(
+      title = "VPD-SIF因果关系与GDP的空间分布",
+      subtitle = "点的大小=GDP水平，颜色=因果类型",
+      x = "经度",
+      y = "纬度"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
+      legend.position = "right",
+      panel.background = element_rect(fill = "aliceblue", color = NA)
+    )
+  
+  print(p_gdp_spatial_vpd)
+}
+
