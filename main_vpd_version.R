@@ -76,7 +76,7 @@ meteo_data <- meteo_sif_data %>%
 # ============================================================================
 
 meteo_data_summer <- meteo_data %>%
-  filter(month %in% 6:8) %>%
+  filter(month %in% 5:10) %>%
   group_by(meteo_stat_id, month) %>%
   mutate(
     temp_q90 = quantile(tavg, 0.9, na.rm = TRUE),
