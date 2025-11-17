@@ -52,19 +52,7 @@ meteo_data_lin <- map(
 # 根据论文方法计算VPD
 meteo_data_with_vpd <- meteo_data_lin %>%
   mutate(
-    # 1. 计算饱和水汽压 SVP (kPa)
-    # Buck方程: SVP = 0.61121 * exp((17.67*T)/(T+243.5))
-    p_mst = 1013.25 * ((tavg + 273.16) / (tavg + 273.16 + 0.0065 * 0))^5.625, 
-    f_w = 1 + 7 * 10^(-4) + 3.46 * 10^(-6) * p_mst, 
-    svp = 6.112 * f_w * exp((17.67 * tavg) / (tavg + 243.5)),
-    
-    # 2. 计算实际水汽压 AVP (kPa)
-    # AVP = (RH/100) * SVP
-    avp = (rh / 100) * svp,
-    
-    # 3. 计算VPD (kPa)
-    # VPD = SVP - AVP
-    vpd = svp - avp
+    vpd = 6.112 * exp((17.67 * tavg) / (tavg + 243.5)) * (1 - rh / 100)
   ) %>%
   # 检查VPD的合理性
   mutate(
