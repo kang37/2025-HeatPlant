@@ -149,32 +149,32 @@ data_for_ccm <- meteo_data %>%
   select(meteo_stat_id, year, month, temp_anomaly, sif, spei)
 
 # ============================================================================
-# 6. CCM分析函数（简化版）
+# 6. CCM分析函数（双向因果版）
 # ============================================================================
 
 perform_ccm_drought <- function(station_id, data, min_points = 30) {
-  
+
   station_data <- data %>%
     filter(meteo_stat_id == station_id) %>%
     arrange(year, month) %>%
     select(temp_anomaly, sif, spei) %>%
     as.data.frame()
-  
+
   n_data <- nrow(station_data)
   if (n_data < min_points) return(NULL)
-  
+
   tryCatch({
-    
+
     station_data_ccm <- data.frame(
       time = 1:n_data,
       temp_anomaly = station_data$temp_anomaly,
       sif = station_data$sif,
       spei = station_data$spei
     )
-    
+
     lib_pred_size <- min(100, n_data)
-    
-    # 确定最优E
+
+    # 确定最优E（分别为SPEI和SIF）
     embed_spei <- EmbedDimension(
       dataFrame = station_data_ccm,
       lib = paste("1", lib_pred_size),
@@ -184,24 +184,36 @@ perform_ccm_drought <- function(station_id, data, min_points = 30) {
       maxE = min(6, floor(n_data/10)),
       showPlot = FALSE
     )
-    
-    E_ccm <- embed_spei$E[which.max(embed_spei$rho)]
-    
+
+    embed_sif <- EmbedDimension(
+      dataFrame = station_data_ccm,
+      lib = paste("1", lib_pred_size),
+      pred = paste("1", lib_pred_size),
+      columns = "sif",
+      target = "sif",
+      maxE = min(6, floor(n_data/10)),
+      showPlot = FALSE
+    )
+
+    best_E_spei <- embed_spei$E[which.max(embed_spei$rho)]
+    best_E_sif <- embed_sif$E[which.max(embed_sif$rho)]
+    E_ccm <- max(best_E_spei, best_E_sif)
+
     # CCM设置
     tau <- 1
     tp <- 1
     embedding_loss <- (E_ccm - 1) * tau
     max_available_lib <- n_data - embedding_loss - tp
-    
+
     lib_start <- max(E_ccm + 2, 10)
     lib_end <- max_available_lib
-    
+
     if (lib_end <= lib_start || lib_end < 15) return(NULL)
-    
+
     lib_step <- max(2, floor((lib_end - lib_start) / 10))
     libSizes_str <- paste(lib_start, lib_end, lib_step)
-    
-    # CCM: SPEI → SIF
+
+    # ========== CCM: SPEI → SIF ==========
     ccm_spei_to_sif <- CCM(
       dataFrame = station_data_ccm,
       E = E_ccm,
@@ -213,16 +225,37 @@ perform_ccm_drought <- function(station_id, data, min_points = 30) {
       random = TRUE,
       showPlot = FALSE
     )
-    
-    ccm_summary <- ccm_spei_to_sif %>%
+
+    ccm_summary_spei_sif <- ccm_spei_to_sif %>%
       rename(lib_size = LibSize) %>%
       group_by(lib_size) %>%
       summarise(rho_mean = mean(`spei:sif`, na.rm = TRUE), .groups = "drop")
-    
-    final_rho <- ccm_summary$rho_mean[nrow(ccm_summary)]
-    trend_rho <- cor(ccm_summary$lib_size, ccm_summary$rho_mean)
-    
-    # S-map: SPEI → SIF
+
+    final_rho_spei_to_sif <- ccm_summary_spei_sif$rho_mean[nrow(ccm_summary_spei_sif)]
+    trend_spei_to_sif <- cor(ccm_summary_spei_sif$lib_size, ccm_summary_spei_sif$rho_mean)
+
+    # ========== CCM: SIF → SPEI ==========
+    ccm_sif_to_spei <- CCM(
+      dataFrame = station_data_ccm,
+      E = E_ccm,
+      Tp = tp,
+      columns = "sif",
+      target = "spei",
+      libSizes = libSizes_str,
+      sample = 50,
+      random = TRUE,
+      showPlot = FALSE
+    )
+
+    ccm_summary_sif_spei <- ccm_sif_to_spei %>%
+      rename(lib_size = LibSize) %>%
+      group_by(lib_size) %>%
+      summarise(rho_mean = mean(`sif:spei`, na.rm = TRUE), .groups = "drop")
+
+    final_rho_sif_to_spei <- ccm_summary_sif_spei$rho_mean[nrow(ccm_summary_sif_spei)]
+    trend_sif_to_spei <- cor(ccm_summary_sif_spei$lib_size, ccm_summary_sif_spei$rho_mean)
+
+    # ========== S-map: SPEI → SIF ==========
     smap_spei_to_sif <- SMap(
       dataFrame = station_data_ccm,
       lib = paste("1", n_data),
@@ -233,46 +266,112 @@ perform_ccm_drought <- function(station_id, data, min_points = 30) {
       target = "sif",
       embedded = FALSE
     )
-    
-    smap_coeffs <- smap_spei_to_sif$coefficients
-    
-    if (!is.null(smap_coeffs) && ncol(smap_coeffs) >= 2) {
-      spei_coef <- smap_coeffs[, 2][!is.na(smap_coeffs[, 2])]
-      mean_smap_coef <- mean(spei_coef, na.rm = TRUE)
-      sd_smap_coef <- sd(spei_coef, na.rm = TRUE)
+
+    smap_coeffs_spei <- smap_spei_to_sif$coefficients
+
+    if (!is.null(smap_coeffs_spei) && ncol(smap_coeffs_spei) >= 2) {
+      spei_coef <- smap_coeffs_spei[, 2][!is.na(smap_coeffs_spei[, 2])]
+      mean_smap_coef_spei_sif <- mean(spei_coef, na.rm = TRUE)
+      sd_smap_coef_spei_sif <- sd(spei_coef, na.rm = TRUE)
     } else {
-      mean_smap_coef <- NA
-      sd_smap_coef <- NA
+      mean_smap_coef_spei_sif <- NA
+      sd_smap_coef_spei_sif <- NA
       spei_coef <- NA
     }
-    
-    # 判断因果
-    spei_causes_sif <- (final_rho > 0.1 & trend_rho > 0)
-    
-    effect_type <- case_when(
+
+    # ========== S-map: SIF → SPEI ==========
+    smap_sif_to_spei <- SMap(
+      dataFrame = station_data_ccm,
+      lib = paste("1", n_data),
+      pred = paste("1", n_data),
+      E = E_ccm,
+      theta = 2,
+      columns = "sif",
+      target = "spei",
+      embedded = FALSE
+    )
+
+    smap_coeffs_sif <- smap_sif_to_spei$coefficients
+
+    if (!is.null(smap_coeffs_sif) && ncol(smap_coeffs_sif) >= 2) {
+      sif_coef <- smap_coeffs_sif[, 2][!is.na(smap_coeffs_sif[, 2])]
+      mean_smap_coef_sif_spei <- mean(sif_coef, na.rm = TRUE)
+      sd_smap_coef_sif_spei <- sd(sif_coef, na.rm = TRUE)
+    } else {
+      mean_smap_coef_sif_spei <- NA
+      sd_smap_coef_sif_spei <- NA
+      sif_coef <- NA
+    }
+
+    # ========== 判断因果方向 ==========
+    ccm_threshold_rho <- 0.1
+    ccm_threshold_trend <- 0
+
+    spei_causes_sif <- (final_rho_spei_to_sif > ccm_threshold_rho &
+                          trend_spei_to_sif > ccm_threshold_trend)
+    sif_causes_spei <- (final_rho_sif_to_spei > ccm_threshold_rho &
+                          trend_sif_to_spei > ccm_threshold_trend)
+
+    # 因果方向分类
+    causality_direction <- case_when(
+      spei_causes_sif & !sif_causes_spei ~ "SPEI → SIF",
+      !spei_causes_sif & sif_causes_spei ~ "SIF → SPEI",
+      spei_causes_sif & sif_causes_spei ~ "双向因果",
+      TRUE ~ "无显著因果"
+    )
+
+    # 效应类型（SPEI → SIF）
+    effect_type_spei_sif <- case_when(
       !spei_causes_sif ~ "无因果",
-      is.na(mean_smap_coef) ~ "S-map失败",
-      mean_smap_coef > 0.001 ~ "促进效应(+)",
-      mean_smap_coef < -0.001 ~ "抑制效应(-)",
+      is.na(mean_smap_coef_spei_sif) ~ "S-map失败",
+      mean_smap_coef_spei_sif > 0.001 ~ "促进效应(+)",
+      mean_smap_coef_spei_sif < -0.001 ~ "抑制效应(-)",
       TRUE ~ "效应极弱"
     )
-    
+
+    # 效应类型（SIF → SPEI）
+    effect_type_sif_spei <- case_when(
+      !sif_causes_spei ~ "无因果",
+      is.na(mean_smap_coef_sif_spei) ~ "S-map失败",
+      mean_smap_coef_sif_spei > 0.001 ~ "促进效应(+)",
+      mean_smap_coef_sif_spei < -0.001 ~ "抑制效应(-)",
+      TRUE ~ "效应极弱"
+    )
+
     # 返回结果
     tibble(
       meteo_stat_id = station_id,
       n_points = n_data,
       E = E_ccm,
-      rho_spei_to_sif = final_rho,
-      trend_spei_to_sif = trend_rho,
+
+      # CCM结果
+      rho_spei_to_sif = final_rho_spei_to_sif,
+      trend_spei_to_sif = trend_spei_to_sif,
+      rho_sif_to_spei = final_rho_sif_to_spei,
+      trend_sif_to_spei = trend_sif_to_spei,
+
+      # 因果判断
       spei_causes_sif = spei_causes_sif,
-      effect_index = mean_smap_coef,
-      effect_index_sd = sd_smap_coef,
-      effect_type = effect_type,
-      smap_coefficients = list(spei_coef),
-      ccm_summary = list(ccm_summary)
+      sif_causes_spei = sif_causes_spei,
+      causality_direction = causality_direction,
+
+      # S-map效应指数（SPEI → SIF）
+      effect_index_spei_sif = mean_smap_coef_spei_sif,
+      effect_index_sd_spei_sif = sd_smap_coef_spei_sif,
+      effect_type_spei_sif = effect_type_spei_sif,
+
+      # S-map效应指数（SIF → SPEI）
+      effect_index_sif_spei = mean_smap_coef_sif_spei,
+      effect_index_sd_sif_spei = sd_smap_coef_sif_spei,
+      effect_type_sif_spei = effect_type_sif_spei,
+
+      # 保存详细数据
+      smap_coefficients_spei_sif = list(spei_coef),
+      smap_coefficients_sif_spei = list(sif_coef)
     )
-    
+
   }, error = function(e) {
+    message("Error in station ", station_id, ": ", e$message)
     return(NULL)
   })
 }
@@ -300,26 +399,82 @@ cat("\n成功分析:", nrow(ccm_results_all), "个站点\n\n")
 # 8. 结果统计
 # ============================================================================
 
-cat("【SPEI → SIF 因果分析结果】\n\n")
+cat("\n", rep("=", 70), "\n", sep = "")
+cat("                   统计结果\n")
+cat(rep("=", 70), "\n\n", sep = "")
 
-spei_to_sif <- ccm_results_all %>% filter(spei_causes_sif)
-
-cat("有因果关系的站点:", nrow(spei_to_sif), "/", nrow(ccm_results_all), "\n")
-cat("因果比例:", round(100 * nrow(spei_to_sif) / nrow(ccm_results_all), 1), "%\n\n")
-
-cat("效应类型分布:\n")
-print(table(spei_to_sif$effect_type))
+# 1. 因果方向统计
+cat("【1. 因果方向统计】\n")
+causality_stats <- table(ccm_results_all$causality_direction)
+print(causality_stats)
+cat("\n百分比:\n")
+print(round(prop.table(causality_stats) * 100, 1))
 cat("\n")
 
-cat("效应统计:\n")
-summary_stats <- spei_to_sif %>%
-  filter(effect_type %in% c("促进效应(+)", "抑制效应(-)")) %>%
+# 2. SPEI → SIF 的效应类型统计
+cat("【2. SPEI → SIF 效应类型统计】\n")
+spei_to_sif_results <- ccm_results_all %>%
+  filter(causality_direction %in% c("SPEI → SIF", "双向因果"))
+
+if (nrow(spei_to_sif_results) > 0) {
+  effect_stats_spei_sif <- table(spei_to_sif_results$effect_type_spei_sif)
+  print(effect_stats_spei_sif)
+  cat("\n百分比:\n")
+  print(round(prop.table(effect_stats_spei_sif) * 100, 1))
+} else {
+  cat("无 SPEI → SIF 因果关系的站点\n")
+}
+cat("\n")
+
+# 3. SIF → SPEI 的效应类型统计
+cat("【3. SIF → SPEI 效应类型统计】\n")
+sif_to_spei_results <- ccm_results_all %>%
+  filter(causality_direction %in% c("SIF → SPEI", "双向因果"))
+
+if (nrow(sif_to_spei_results) > 0) {
+  effect_stats_sif_spei <- table(sif_to_spei_results$effect_type_sif_spei)
+  print(effect_stats_sif_spei)
+  cat("\n百分比:\n")
+  print(round(prop.table(effect_stats_sif_spei) * 100, 1))
+} else {
+  cat("无 SIF → SPEI 因果关系的站点\n")
+}
+cat("\n")
+
+# 4. 效应指数统计
+cat("【4. 效应指数（S-map系数）统计】\n\n")
+
+cat("SPEI → SIF 方向:\n")
+spei_sif_index_stats <- spei_to_sif_results %>%
+  filter(!is.na(effect_index_spei_sif)) %>%
   summarise(
-    平均效应指数 = mean(effect_index, na.rm = TRUE),
-    中位效应指数 = median(effect_index, na.rm = TRUE),
-    效应标准差 = sd(effect_index, na.rm = TRUE)
+    n = n(),
+    mean = mean(effect_index_spei_sif),
+    sd = sd(effect_index_spei_sif),
+    median = median(effect_index_spei_sif),
+    min = min(effect_index_spei_sif),
+    max = max(effect_index_spei_sif),
+    n_positive = sum(effect_index_spei_sif > 0.001),
+    n_negative = sum(effect_index_spei_sif < -0.001),
+    pct_negative = round(sum(effect_index_spei_sif < -0.001) / n() * 100, 1)
   )
-print(summary_stats)
+print(spei_sif_index_stats)
+cat("\n")
+
+if (nrow(sif_to_spei_results) > 0) {
+  cat("SIF → SPEI 方向:\n")
+  sif_spei_index_stats <- sif_to_spei_results %>%
+    filter(!is.na(effect_index_sif_spei)) %>%
+    summarise(
+      n = n(),
+      mean = mean(effect_index_sif_spei),
+      sd = sd(effect_index_sif_spei),
+      median = median(effect_index_sif_spei),
+      min = min(effect_index_sif_spei),
+      max = max(effect_index_sif_spei)
+    )
+  print(sif_spei_index_stats)
+}
 cat("\n")
 
 # ============================================================================
@@ -332,32 +487,50 @@ spatial_data <- ccm_results_all %>%
   left_join(station_coords, by = "meteo_stat_id") %>%
   filter(!is.na(longitude), !is.na(latitude))
 
+cat("有坐标的站点数:", nrow(spatial_data), "\n\n")
+
+# 准备SPEI → SIF因果关系的数据
+spatial_spei_sif <- spatial_data %>%
+  filter(causality_direction %in% c("SPEI → SIF", "双向因果")) %>%
+  mutate(
+    effect_strength = abs(effect_index_spei_sif)
+  )
+
 china_map <- ne_countries(country = "china", scale = "medium", returnclass = "sf")
 
-# 地图1: 因果关系空间分布
+# 地图1: 因果方向 + 效应类型（SPEI → SIF）
 p1 <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
   geom_point(
-    data = spatial_data %>% filter(spei_causes_sif),
-    aes(x = longitude, y = latitude, 
-        color = effect_type,
-        size = abs(effect_index)),
+    data = spatial_spei_sif,
+    aes(x = longitude, y = latitude,
+        color = effect_type_spei_sif,
+        shape = causality_direction,
+        size = effect_strength),
     alpha = 0.7
   ) +
   scale_color_manual(
     values = c(
       "促进效应(+)" = "#4575b4",
       "抑制效应(-)" = "#d73027",
-      "效应极弱" = "#fee090"
+      "效应极弱" = "#fdae61",
+      "S-map失败" = "#999999"
     ),
     name = "效应类型"
   ) +
-  scale_size_continuous(range = c(1, 5), name = "|效应指数|") +
+  scale_shape_manual(
+    values = c("SPEI → SIF" = 16, "双向因果" = 17),
+    name = "因果方向"
+  ) +
+  scale_size_continuous(range = c(1, 5), name = "效应强度\n|∂|") +
   labs(
-    title = "SPEI → SIF 因果关系的空间分布",
-    subtitle = paste0("有因果站点: ", nrow(spei_to_sif), " / 总站点: ", 
-                      nrow(ccm_results_all)),
-    x = "经度", y = "纬度"
+    title = "SPEI对SIF的因果效应空间分布",
+    subtitle = paste0("n=", nrow(spatial_spei_sif),
+                      " | 抑制效应: ", sum(spatial_spei_sif$effect_type_spei_sif == "抑制效应(-)", na.rm = TRUE),
+                      " | 促进效应: ", sum(spatial_spei_sif$effect_type_spei_sif == "促进效应(+)", na.rm = TRUE),
+                      " | 双向因果: ", sum(spatial_spei_sif$causality_direction == "双向因果")),
+    x = "经度", y = "纬度",
+    caption = "圆形=单向因果（SPEI→SIF），三角形=双向因果"
   ) +
   theme_minimal() +
   theme(
@@ -369,14 +542,15 @@ p1 <- ggplot() +
 
 print(p1)
 
-# 地图2: 效应指数连续分布
+# 地图2: 效应指数连续分布（SPEI → SIF）
 p2 <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
   geom_point(
-    data = spatial_data %>% filter(spei_causes_sif, !is.na(effect_index)),
+    data = spatial_spei_sif %>% filter(!is.na(effect_index_spei_sif)),
     aes(x = longitude, y = latitude,
-        color = effect_index,
-        size = abs(effect_index)),
+        color = effect_index_spei_sif,
+        shape = causality_direction,
+        size = abs(effect_index_spei_sif)),
     alpha = 0.7
   ) +
   scale_color_gradient2(
@@ -384,12 +558,16 @@ p2 <- ggplot() +
     mid = "white",
     high = "#4575b4",
     midpoint = 0,
-    name = "效应指数"
+    name = "效应指数\n∂"
   ) +
-  scale_size_continuous(range = c(1, 5), name = "|效应|") +
+  scale_shape_manual(
+    values = c("SPEI → SIF" = 16, "双向因果" = 17),
+    name = "因果方向"
+  ) +
+  scale_size_continuous(range = c(1, 5), name = "|∂|") +
   labs(
     title = "SPEI → SIF 效应指数的空间梯度",
-    subtitle = "蓝色=干旱促进SIF，红色=干旱抑制SIF",
+    subtitle = "蓝色=SPEI促进SIF（湿润有利），红色=SPEI抑制SIF（干旱有害）",
     x = "经度", y = "纬度"
   ) +
   theme_minimal() +
@@ -402,8 +580,87 @@ p2 <- ggplot() +
 
 print(p2)
 
+# 地图3: 所有因果方向的分布
+p3 <- ggplot() +
+  geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
+  geom_point(
+    data = spatial_data %>% filter(causality_direction != "无显著因果"),
+    aes(x = longitude, y = latitude,
+        color = causality_direction),
+    alpha = 0.7,
+    size = 2.5
+  ) +
+  scale_color_manual(
+    values = c(
+      "SPEI → SIF" = "#1b9e77",
+      "SIF → SPEI" = "#d95f02",
+      "双向因果" = "#7570b3"
+    ),
+    name = "因果方向"
+  ) +
+  labs(
+    title = "SPEI与SIF因果方向的空间分布",
+    subtitle = paste0("SPEI→SIF: ", sum(spatial_data$causality_direction == "SPEI → SIF"),
+                      " | SIF→SPEI: ", sum(spatial_data$causality_direction == "SIF → SPEI"),
+                      " | 双向: ", sum(spatial_data$causality_direction == "双向因果"),
+                      " | 无因果: ", sum(spatial_data$causality_direction == "无显著因果")),
+    x = "经度", y = "纬度"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    panel.background = element_rect(fill = "aliceblue", color = NA)
+  )
+
+print(p3)
+
+# ============================================================================
+# 最终总结表
+# ============================================================================
+
+cat("\n", rep("=", 70), "\n", sep = "")
+cat("                   最终总结\n")
+cat(rep("=", 70), "\n\n", sep = "")
+
+summary_table <- tibble(
+  分类 = c(
+    "总站点数",
+    "有SPEI→SIF因果",
+    "  - 单向因果",
+    "  - 双向因果",
+    "有SIF→SPEI因果",
+    "  - 单向因果",
+    "  - 双向因果",
+    "无显著因果",
+    "",
+    "SPEI→SIF效应类型:",
+    "  - 抑制效应(-)",
+    "  - 促进效应(+)",
+    "  - 效应极弱"
+  ),
+  数量 = c(
+    nrow(ccm_results_all),
+    nrow(spei_to_sif_results),
+    sum(ccm_results_all$causality_direction == "SPEI → SIF"),
+    sum(ccm_results_all$causality_direction == "双向因果"),
+    nrow(sif_to_spei_results),
+    sum(ccm_results_all$causality_direction == "SIF → SPEI"),
+    sum(ccm_results_all$causality_direction == "双向因果"),
+    sum(ccm_results_all$causality_direction == "无显著因果"),
+    "",
+    "",
+    sum(spei_to_sif_results$effect_type_spei_sif == "抑制效应(-)", na.rm = TRUE),
+    sum(spei_to_sif_results$effect_type_spei_sif == "促进效应(+)", na.rm = TRUE),
+    sum(spei_to_sif_results$effect_type_spei_sif == "效应极弱", na.rm = TRUE)
+  )
+)
+
+print(summary_table)
+
 cat("\n分析完成!\n")
 
 # 保存结果
-# fwrite(ccm_results_all, "ccm_results_spei_sif.csv")
-# fwrite(spatial_data, "ccm_results_spatial.csv")
+# fwrite(ccm_results_all, "data_proc/ccm_results_spei_sif.csv")
+# fwrite(spatial_data, "data_proc/ccm_results_spei_spatial.csv")
