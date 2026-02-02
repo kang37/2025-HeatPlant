@@ -952,8 +952,8 @@ cat("【GDP空间分布图】\n")
 
 if (nrow(spatial_econ_valid) > 0) {
   p_gdp_spatial <- ggplot() +
-    geom_sf(data = china_cities_shp, fill = "gray95", color = "gray70",
-            linewidth = 0.2, alpha = 0.3) +
+    geom_sf(data = china_map, fill = "gray95", color = "gray70",
+            linewidth = 0.3) +
     geom_point(
       data = spatial_econ_valid %>%
         filter(heat_causality %in% c("热事件促进SIF", "热事件抑制SIF",
