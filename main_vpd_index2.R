@@ -1,23 +1,16 @@
-# ============================================================================
-# VPD热事件综合分析（改进版）
+# VPD热事件综合分析
 # 基于文献阈值（2.0 kPa），双向因果分析，经济关联
-# ============================================================================
 
-pacman::p_load(dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr,
-               tidyr, showtext, rEDM, sf, rnaturalearth, rnaturalearthdata,
-               patchwork, readxl)
+pacman::p_load(
+  dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr,
+  tidyr, showtext, rEDM, sf, rnaturalearth, rnaturalearthdata,
+  patchwork, readxl
+)
 showtext_auto()
-
-cat("\n", rep("=", 70), "\n", sep = "")
-cat("        VPD热事件综合分析（文献阈值 + 双向因果）\n")
-cat(rep("=", 70), "\n\n", sep = "")
 
 # ============================================================================
 # 1. 读取站点SIF数据
 # ============================================================================
-
-cat("【1. 读取数据】\n")
-
 meteo_sif_data <- read.csv("data_raw/meteo_stat_SIF_data.csv") %>%
   tibble() %>%
   rename_with(~tolower(.x)) %>%
@@ -38,7 +31,6 @@ cat("目标站点数:", length(target_stations), "\n")
 # ============================================================================
 # 2. 读取每日气象数据
 # ============================================================================
-
 read_one_meteo_daily <- function(path) {
   station_id <- str_extract(basename(path), "\\d+")
   read_csv(path, skip = 1, show_col_types = FALSE, na = c("", "NA")) %>%
@@ -55,7 +47,9 @@ meteo_file_list <- list.files(
   .[!grepl("sta_lonlat_china.txt", .)]
 
 meteo_data_daily <- map(
-  meteo_file_list[str_extract(basename(meteo_file_list), "\\d+") %in% target_stations],
+  meteo_file_list[
+    str_extract(basename(meteo_file_list), "\\d+") %in% target_stations
+  ],
   read_one_meteo_daily
 ) %>%
   list_rbind() %>%
@@ -93,9 +87,8 @@ meteo_data_daily_vpd <- meteo_data_daily %>%
   filter(!is.na(vpd))
 
 cat("VPD数据行数:", nrow(meteo_data_daily_vpd), "\n")
-cat("VPD统计: 均值=", round(mean(meteo_data_daily_vpd$vpd, na.rm = TRUE), 3),
-    " kPa, 中位=", round(median(meteo_data_daily_vpd$vpd, na.rm = TRUE), 3),
-    " kPa\n\n")
+quantile(meteo_data_daily_vpd$vpd)
+mean(meteo_data_daily_vpd$vpd)
 
 # ============================================================================
 # 4. 基于文献阈值构建月度VPD热事件指标
@@ -972,7 +965,7 @@ if (nrow(spatial_econ_valid) > 0) {
       ),
       name = "因果类型"
     ) +
-    scale_size_continuous(range = c(1, 10), name = "人均GDP\n(万元)") +
+    scale_size_continuous(range = c(0.1, 3), name = "人均GDP\n(万元)") +
     labs(
       title = "VPD热事件因果关系与GDP的空间分布",
       subtitle = "点的大小=GDP水平，颜色=因果类型",
