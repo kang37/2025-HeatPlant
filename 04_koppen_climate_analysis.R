@@ -192,7 +192,7 @@ p1 <- analysis_data %>%
 
 print(p1)
 ggsave("data_proc/koppen_causality_stacked_bar.png", p1,
-       width = 12, height = 9, dpi = 300)
+       width = 12, height = 9, dpi = 300, scale = 0.4)
 cat("图1已保存: data_proc/koppen_causality_stacked_bar.png\n")
 
 # --- 图2: 详细气候类型的因果分布（热图） ---
@@ -237,7 +237,7 @@ p2 <- heatmap_data %>%
 
 print(p2)
 ggsave("data_proc/koppen_causality_heatmap.png", p2,
-       width = 12, height = 10, dpi = 300)
+       width = 12, height = 10, dpi = 300, scale = 0.4)
 cat("图2已保存: data_proc/koppen_causality_heatmap.png\n")
 
 # --- 图3: 气候大类的因果类型计数柱状图（分面） ---
@@ -245,7 +245,7 @@ p3 <- analysis_data %>%
   count(climate_group, heat_causality) %>%
   ggplot(aes(x = heat_causality, y = n, fill = heat_causality)) +
   geom_col(width = 0.7) +
-  facet_wrap(~climate_group, scales = "free_y", ncol = 3) +
+  facet_wrap(~climate_group, ncol = 2) +
   scale_fill_manual(values = causality_colors, guide = "none") +
   labs(
     title = "各柯本气候大类的因果类型站点数",
@@ -264,7 +264,7 @@ p3 <- analysis_data %>%
 
 print(p3)
 ggsave("data_proc/koppen_causality_facet_bar.png", p3,
-       width = 14, height = 10, dpi = 300)
+       width = 14, height = 10, dpi = 300, scale = 0.4)
 cat("图3已保存: data_proc/koppen_causality_facet_bar.png\n")
 
 # ============================================================================
@@ -361,7 +361,7 @@ p_map <- ggplot() +
 
 print(p_map)
 ggsave("data_proc/china_koppen_climate_map.png", p_map,
-       width = 14, height = 11, dpi = 300)
+       width = 14, height = 11, dpi = 300, scale = 0.4)
 cat("地图已保存: data_proc/china_koppen_climate_map.png\n")
 
 p_map_group <- ggplot() +
@@ -398,7 +398,7 @@ p_map_group <- ggplot() +
 
 print(p_map_group)
 ggsave("data_proc/china_koppen_climate_group_map.png", p_map_group,
-       width = 14, height = 11, dpi = 300)
+       width = 14, height = 11, dpi = 300, scale = 0.4)
 cat("简化地图已保存: data_proc/china_koppen_climate_group_map.png\n")
 
 cat("\n分析完成!\n")

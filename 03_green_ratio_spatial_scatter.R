@@ -145,11 +145,12 @@ p_lat <- plot_data %>%
     legend.text = element_text(size = 14),
     legend.position = "right",
     panel.grid.minor = element_blank()
-  )
+  ) + 
+  facet_wrap(.~ heat_causality)
 
 print(p_lat)
 ggsave("data_proc/scatter_green_ratio_latitude.png", p_lat,
-       width = 12, height = 9, dpi = 300)
+       width = 12, height = 9, dpi = 300, scale = 0.4)
 cat("图1已保存: data_proc/scatter_green_ratio_latitude.png\n")
 
 # ============================================================================
@@ -182,11 +183,12 @@ p_lon <- plot_data %>%
     legend.text = element_text(size = 14),
     legend.position = "right",
     panel.grid.minor = element_blank()
-  )
+  ) + 
+  facet_wrap(.~ heat_causality)
 
 print(p_lon)
 ggsave("data_proc/scatter_green_ratio_longitude.png", p_lon,
-       width = 12, height = 9, dpi = 300)
+       width = 15, height = 9, dpi = 300, scale = 0.4)
 cat("图2已保存: data_proc/scatter_green_ratio_longitude.png\n")
 
 # ============================================================================
@@ -202,7 +204,7 @@ p_combined <- p_lat + p_lon +
   )
 
 ggsave("data_proc/scatter_green_ratio_spatial_combined.png", p_combined,
-       width = 18, height = 9, dpi = 300)
+       width = 18, height = 9, dpi = 300, scale = 0.4)
 cat("组合图已保存: data_proc/scatter_green_ratio_spatial_combined.png\n")
 
 cat("\n分析完成!\n")

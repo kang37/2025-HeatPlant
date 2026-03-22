@@ -204,7 +204,7 @@ p1 <- analysis_data %>%
 
 print(p1)
 ggsave("data_proc/boxplot_green_invest_causality.png", p1,
-       width = 10, height = 8, dpi = 300)
+       width = 10, height = 8, dpi = 300, scale = 0.4)
 cat("图1已保存: data_proc/boxplot_green_invest_causality.png\n")
 
 # ============================================================================
@@ -260,7 +260,7 @@ p2 <- analysis_data_ratio %>%
 
 print(p2)
 ggsave("data_proc/boxplot_green_ratio_causality.png", p2,
-       width = 10, height = 8, dpi = 300)
+       width = 10, height = 8, dpi = 300, scale = 0.4)
 cat("图2已保存: data_proc/boxplot_green_ratio_causality.png\n")
 
 # ============================================================================
