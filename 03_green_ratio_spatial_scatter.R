@@ -9,7 +9,7 @@ pacman::p_load(
 showtext_auto()
 
 # ============================================================================
-# 1. 加载数据（复用02脚本的数据准备逻辑）
+# 1. 加载数据
 # ============================================================================
 
 cat("【1. 加载数据】\n")
@@ -49,9 +49,7 @@ green_invest <- read_csv(
 gdp_data <- read_excel("data_raw/中国城市数据库1990-2023.xlsx") %>%
   filter(年份 == 2020) %>%
   select(city_name = 城市, gdp_total = "地区生产总值(万元)") %>%
-  mutate(
-    gdp_total = as.numeric(gdp_total)
-  )
+  mutate(gdp_total = as.numeric(gdp_total))
 
 # 合并绿化和GDP
 green_gdp <- green_invest %>%
@@ -85,40 +83,33 @@ spatial_data <- ccm_results_all %>%
   left_join(green_gdp, by = "city_name") %>%
   filter(!is.na(longitude), !is.na(latitude))
 
-# 创建因果类型标签和效应强度
+# 简化因果类型：只分三类（促进、抑制、无因果）
 plot_data <- spatial_data %>%
   mutate(
     heat_causality = case_when(
       causality_direction == "无显著因果" ~ "无因果",
-      causality_direction == "SIF → VPD热影响" ~ "SIF->VPD热影响",
-      effect_type_heat_sif == "促进效应(+)" & causality_direction == "VPD热影响 → SIF" ~ "热事件促进SIF",
-      effect_type_heat_sif == "抑制效应(-)" & causality_direction == "VPD热影响 → SIF" ~ "热事件抑制SIF",
-      effect_type_heat_sif == "促进效应(+)" & causality_direction == "双向因果" ~ "双向-促进SIF",
-      effect_type_heat_sif == "抑制效应(-)" & causality_direction == "双向因果" ~ "双向-抑制SIF",
+      effect_type_heat_sif == "促进效应(+)" ~ "促进",
+      effect_type_heat_sif == "抑制效应(-)" ~ "抑制",
       TRUE ~ "其他"
     ),
-    # 因果强度：使用效应指数的绝对值
     effect_strength = abs(effect_index_heat_sif)
   ) %>%
   filter(
     !is.na(green_ratio),
-    green_ratio > 0, green_ratio < 10,  # 过滤异常值
-    heat_causality %in% c("热事件促进SIF", "热事件抑制SIF",
-                          "双向-促进SIF", "双向-抑制SIF", "无因果"),
+    green_ratio > 0, green_ratio < 10,
+    heat_causality %in% c("促进", "抑制", "无因果"),
     !is.na(effect_strength)
   )
 
 cat("用于绑图的站点数:", nrow(plot_data), "\n")
 
 # ============================================================================
-# 2. 定义颜色
+# 2. 定义颜色（三类）
 # ============================================================================
 
 causality_colors <- c(
-  "热事件促进SIF" = "#4575b4",
-  "热事件抑制SIF" = "#d73027",
-  "双向-促进SIF" = "#91bfdb",
-  "双向-抑制SIF" = "#fc8d59",
+  "促进" = "#4575b4",
+  "抑制" = "#d73027",
   "无因果" = "#999999"
 )
 
@@ -137,24 +128,28 @@ p_lat <- plot_data %>%
   )) +
   geom_point(alpha = 0.6) +
   scale_color_manual(values = causality_colors, name = "因果类型") +
-  scale_size_continuous(range = c(1, 6), name = "因果强度\n|效应指数|") +
+  scale_size_continuous(range = c(1.5, 8), name = "因果强度\n|效应指数|") +
   labs(
     title = "绿化投资占GDP比例与纬度的关系",
     subtitle = "点大小表示因果效应强度",
     x = "绿化投资占GDP比例 (%)",
     y = "纬度 (°N)"
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 18) +
   theme(
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray50"),
+    plot.title = element_text(face = "bold", size = 22, hjust = 0.5),
+    plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50"),
+    axis.title = element_text(size = 18),
+    axis.text = element_text(size = 16),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
     legend.position = "right",
     panel.grid.minor = element_blank()
   )
 
 print(p_lat)
 ggsave("data_proc/scatter_green_ratio_latitude.png", p_lat,
-       width = 10, height = 7, dpi = 300)
+       width = 12, height = 9, dpi = 300)
 cat("图1已保存: data_proc/scatter_green_ratio_latitude.png\n")
 
 # ============================================================================
@@ -170,24 +165,28 @@ p_lon <- plot_data %>%
   )) +
   geom_point(alpha = 0.6) +
   scale_color_manual(values = causality_colors, name = "因果类型") +
-  scale_size_continuous(range = c(1, 6), name = "因果强度\n|效应指数|") +
+  scale_size_continuous(range = c(1.5, 8), name = "因果强度\n|效应指数|") +
   labs(
     title = "绿化投资占GDP比例与经度的关系",
     subtitle = "点大小表示因果效应强度",
     x = "绿化投资占GDP比例 (%)",
     y = "经度 (°E)"
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 18) +
   theme(
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray50"),
+    plot.title = element_text(face = "bold", size = 22, hjust = 0.5),
+    plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50"),
+    axis.title = element_text(size = 18),
+    axis.text = element_text(size = 16),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
     legend.position = "right",
     panel.grid.minor = element_blank()
   )
 
 print(p_lon)
 ggsave("data_proc/scatter_green_ratio_longitude.png", p_lon,
-       width = 10, height = 7, dpi = 300)
+       width = 12, height = 9, dpi = 300)
 cat("图2已保存: data_proc/scatter_green_ratio_longitude.png\n")
 
 # ============================================================================
@@ -196,10 +195,14 @@ cat("图2已保存: data_proc/scatter_green_ratio_longitude.png\n")
 
 p_combined <- p_lat + p_lon +
   plot_layout(guides = "collect") &
-  theme(legend.position = "bottom")
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14)
+  )
 
 ggsave("data_proc/scatter_green_ratio_spatial_combined.png", p_combined,
-       width = 14, height = 7, dpi = 300)
+       width = 18, height = 9, dpi = 300)
 cat("组合图已保存: data_proc/scatter_green_ratio_spatial_combined.png\n")
 
 cat("\n分析完成!\n")
