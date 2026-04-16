@@ -170,25 +170,45 @@ causality_colors <- c(
   "无因果" = "#999999"
 )
 
+# 定义分段线性转换函数 (用于坐标轴压缩)
+# 参数: x 数据, breakpoint 转折点, factor 压缩倍率
+pw_trans <- function(x, bp, factor = 5) {
+  ifelse(x <= bp, x, bp + (x - bp) / factor)
+}
+
+# 逆转换 (用于恢复标签)
+pw_inv <- function(x, bp, factor = 5) {
+  ifelse(x <= bp, x, bp + (x - bp) * factor)
+}
+
 # ============================================================================
-# 7. 绘图1: 绿化投资 vs 因果类型
+# 7. 绘图1: 绿化投资 vs 因果类型 (坐标轴压缩)
 # ============================================================================
 
-cat("\n【7. 绑制箱线图】\n")
+cat("\n【7. 绘制箱线图 (投资额 - 20亿以上压缩)】\n")
 
+bp_inv <- 20
 p1 <- analysis_data %>%
   mutate(green_invest_亿元 = green_invest_2020 / 10000) %>%
+  # 手动转换数据用于绘图
+  mutate(y_trans = pw_trans(green_invest_亿元, bp_inv, 5)) %>%
   ggplot(aes(
     x = reorder(heat_causality, -green_invest_亿元, FUN = median),
-    y = green_invest_亿元,
+    y = y_trans,
     fill = heat_causality
   )) +
-  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3, outlier.size = 1.5) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3, outlier.size = 2) +
   geom_jitter(width = 0.2, alpha = 0.4, size = 2, color = "gray30") +
+  # 设置坐标轴标签
+  scale_y_continuous(
+    breaks = pw_trans(c(0, 5, 10, 15, 20, 40, 60, 80, 100), bp_inv, 5),
+    labels = c(0, 5, 10, 15, 20, 40, 60, 80, 100)
+  ) +
+  geom_hline(yintercept = pw_trans(bp_inv, bp_inv), linetype = "dashed", color = "blue", alpha = 0.5) +
   scale_fill_manual(values = causality_colors, guide = "none") +
   labs(
-    title = "VPD热事件因果类型与城市绿化投资的关系",
-    subtitle = "数据年份: 2020年",
+    title = "因果类型与城市绿化投资的关系 (压缩尺度)",
+    subtitle = paste0("虚线(20亿)以上部分按 1/5 比例压缩显示"),
     x = "因果类型",
     y = "园林绿化投资 (亿元)"
   ) +
@@ -197,18 +217,14 @@ p1 <- analysis_data %>%
     plot.title = element_text(face = "bold", size = 22, hjust = 0.5),
     plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50"),
     axis.title = element_text(size = 18),
-    axis.text = element_text(size = 16),
-    axis.text.x = element_text(angle = 0, hjust = 0.5),
-    panel.grid.minor = element_blank()
+    axis.text = element_text(size = 16)
   )
 
 print(p1)
-ggsave("data_proc/boxplot_green_invest_causality.png", p1,
-       width = 10, height = 8, dpi = 300, scale = 0.4)
-cat("图1已保存: data_proc/boxplot_green_invest_causality.png\n")
+ggsave("data_proc/boxplot_green_invest_causality.png", p1, width = 11, height = 9, dpi = 300)
 
 # ============================================================================
-# 8. 绘图2: 绿化投资占GDP比例 vs 因果类型
+# 8. 绘图2: 绿化投资占GDP比例 vs 因果类型 (坐标轴压缩)
 # ============================================================================
 
 analysis_data_ratio <- spatial_green %>%
@@ -218,50 +234,40 @@ analysis_data_ratio <- spatial_green %>%
     heat_causality %in% c("促进", "抑制", "无因果")
   )
 
-cat("\n绿化投资占GDP比例分析 (站点数:", nrow(analysis_data_ratio), ")\n")
+cat("\n【8. 绘制箱线图 (占比 - 0.5%以上压缩)】\n")
 
-cat("因果类型的绿化投资占比统计:\n")
-ratio_stats <- analysis_data_ratio %>%
-  group_by(heat_causality) %>%
-  summarise(
-    站点数 = n(),
-    平均占比_百分比 = round(mean(green_ratio, na.rm = TRUE), 4),
-    中位占比_百分比 = round(median(green_ratio, na.rm = TRUE), 4),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(站点数))
-print(ratio_stats)
-
+bp_ratio <- 0.5
 p2 <- analysis_data_ratio %>%
+  mutate(y_trans = pw_trans(green_ratio, bp_ratio, 5)) %>%
   ggplot(aes(
     x = reorder(heat_causality, -green_ratio, FUN = median),
-    y = green_ratio,
+    y = y_trans,
     fill = heat_causality
   )) +
-  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3, outlier.size = 1.5) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3, outlier.size = 2) +
   geom_jitter(width = 0.2, alpha = 0.4, size = 2, color = "gray30") +
+  scale_y_continuous(
+    breaks = pw_trans(c(0, 0.25, 0.5, 1, 1.5, 2, 3), bp_ratio, 5),
+    labels = scales::percent_format(scale = 1)(c(0, 0.25, 0.5, 1, 1.5, 2, 3))
+  ) +
+  geom_hline(yintercept = pw_trans(bp_ratio, bp_ratio), linetype = "dashed", color = "blue", alpha = 0.5) +
   scale_fill_manual(values = causality_colors, guide = "none") +
-  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
   labs(
-    title = "VPD热事件因果类型与绿化投资占GDP比例的关系",
-    subtitle = "数据年份: 2020年",
+    title = "因果类型与绿化投资占比的关系 (压缩尺度)",
+    subtitle = paste0("虚线(0.5%)以上部分按 1/5 比例压缩显示"),
     x = "因果类型",
-    y = "绿化投资占GDP比例 (%)"
+    y = "绿化投资占GDP比例"
   ) +
   theme_minimal(base_size = 18) +
   theme(
     plot.title = element_text(face = "bold", size = 22, hjust = 0.5),
     plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50"),
     axis.title = element_text(size = 18),
-    axis.text = element_text(size = 16),
-    axis.text.x = element_text(angle = 0, hjust = 0.5),
-    panel.grid.minor = element_blank()
+    axis.text = element_text(size = 16)
   )
 
 print(p2)
-ggsave("data_proc/boxplot_green_ratio_causality.png", p2,
-       width = 10, height = 8, dpi = 300, scale = 0.4)
-cat("图2已保存: data_proc/boxplot_green_ratio_causality.png\n")
+ggsave("data_proc/boxplot_green_ratio_causality.png", p2, width = 11, height = 9, dpi = 300)
 
 # ============================================================================
 # 9. 统计检验
