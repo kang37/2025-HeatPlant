@@ -1028,5 +1028,5 @@ print(summary_table)
 cat("\n分析完成!\n")
 
 # 保存结果
-# fwrite(ccm_results_all %>% select(-starts_with("smap_coefficients")),
-#        "data_proc/ccm_results_vpd_heat_sif.csv")
+fwrite(ccm_results_all %>% select(-starts_with("smap_coefficients")),
+       "data_proc/ccm_results_vpd_heat_sif.csv")
