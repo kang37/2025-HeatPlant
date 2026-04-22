@@ -210,6 +210,17 @@ gdp_data <- read_excel("data_raw/中国城市数据库1990-2023.xlsx") %>%
     gdp_total = as.numeric(gdp_total)
   )
 
+# 读取2020年绿地面积 (新维度)
+cat("读取绿地面积数据...\n")
+green_area_2020 <- read_excel("data_raw/城市绿地面积数据_2003-2023.xlsx", sheet = "绿地面积_明细数据") %>%
+  filter(年份 == 2020) %>%
+  dplyr::select(city_name = 城市, area_ha = `绿地面积(公顷)`) %>%
+  mutate(
+    area_ha = as.numeric(area_ha),
+    city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市"))
+  ) %>%
+  filter(!is.na(area_ha), area_ha > 0)
+
 # 2020年绿化投资
 green_invest_2020 <- green_invest_long %>%
   filter(year == 2020)
@@ -219,10 +230,13 @@ sif_invest_data <- station_sif_mean %>%
   left_join(stations_with_city %>% dplyr::select(meteo_stat_id, city_name), by = "meteo_stat_id") %>%
   left_join(green_invest_2020, by = "city_name") %>%
   left_join(gdp_data, by = "city_name") %>%
+  left_join(green_area_2020, by = "city_name") %>%
   filter(!is.na(green_invest), !is.na(sif_mean)) %>%
   mutate(
     green_ratio = green_invest / gdp_total * 100,
-    green_invest_亿元 = green_invest / 10000
+    green_invest_亿元 = green_invest / 10000,
+    # 单位面积投资 (万元/公顷)
+    invest_intensity = green_invest / area_ha
   ) %>%
   filter(green_ratio > 0, green_ratio < 10)  # 过滤异常值
 
@@ -234,6 +248,7 @@ cat("有效站点数:", nrow(sif_invest_data), "\n")
 
 cat("\n【6. 绘制投资与SIF关系图】\n")
 
+# --- 6.1 绝对投资额 vs SIF ---
 p_invest_sif <- ggplot(sif_invest_data, aes(x = green_invest_亿元, y = sif_mean)) +
   geom_point(alpha = 0.5, size = 2.5, color = "#4575b4") +
   geom_smooth(method = "loess", color = "#d73027", se = TRUE, linewidth = 1.2) +
@@ -246,17 +261,32 @@ p_invest_sif <- ggplot(sif_invest_data, aes(x = green_invest_亿元, y = sif_mea
   theme_minimal(base_size = 18) +
   theme(
     plot.title = element_text(face = "bold", size = 22, hjust = 0.5),
-    plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50"),
-    axis.title = element_text(size = 18),
-    axis.text = element_text(size = 16)
+    plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50")
   )
 
-print(p_invest_sif)
-ggsave("data_proc/green_invest_sif_scatter.png", p_invest_sif,
-       width = 12, height = 9, dpi = 300, scale = 0.4)
-cat("图2已保存: data_proc/green_invest_sif_scatter.png\n")
+# --- 6.2 投资强度 vs SIF (新) ---
+p_intensity_sif <- ggplot(sif_invest_data %>% filter(!is.na(invest_intensity)), 
+                          aes(x = invest_intensity, y = sif_mean)) +
+  geom_point(alpha = 0.5, size = 2.5, color = "#4daf4a") +
+  geom_smooth(method = "loess", color = "#d73027", se = TRUE, linewidth = 1.2) +
+  scale_x_log10() +
+  labs(
+    title = "单位面积绿化投资与平均SIF的关系",
+    subtitle = "2020年投资强度 (万元/公顷) vs 站点多年平均SIF",
+    x = "单位面积投资 (万元/公顷, 对数轴)",
+    y = "平均SIF"
+  ) +
+  theme_minimal(base_size = 18) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22, hjust = 0.5),
+    plot.subtitle = element_text(size = 16, hjust = 0.5, color = "gray50")
+  )
 
-# 绿化占比与SIF
+# 组合保存
+p_combined_sif <- p_invest_sif + p_intensity_sif
+ggsave("data_proc/green_invest_sif_extended.png", p_combined_sif, width = 18, height = 8, dpi = 300, scale = 0.5)
+cat("SIF扩展关系图已保存: data_proc/green_invest_sif_extended.png\n")
+
 # ============================================================================
 # 7. 投资与因果效应强度的阈值分析
 # ============================================================================
@@ -269,12 +299,15 @@ threshold_base <- ccm_results_all %>%
   left_join(stations_with_city %>% dplyr::select(meteo_stat_id, city_name), by = "meteo_stat_id") %>%
   left_join(green_invest_2020, by = "city_name") %>%
   left_join(gdp_data, by = "city_name") %>%
+  left_join(green_area_2020, by = "city_name") %>%
   filter(!is.na(green_invest), !is.na(effect_index_heat_sif)) %>%
   mutate(
     green_ratio = green_invest / gdp_total * 100,
     green_invest_亿元 = green_invest / 10000,
+    invest_intensity = green_invest / area_ha,
     log_green_ratio = log10(green_ratio),
     log_green_invest = log10(green_invest_亿元),
+    log_invest_intensity = log10(invest_intensity),
     heat_causality = case_when(
       causality_direction == "无显著因果" ~ "无因果",
       effect_type_heat_sif == "促进效应(+)" ~ "促进",
@@ -284,25 +317,27 @@ threshold_base <- ccm_results_all %>%
   ) %>%
   filter(green_ratio > 0, green_ratio < 10)
 
-# --- 7.1 促进效应 (Promoting Effect) 深度分析 ---
-cat("\n7.1 促进效应分析\n")
+# --- 7.1 促进效应深度分析 (增加强度维度) ---
+cat("\n7.1 促进效应分析 (增加投资强度维度)\n")
 promote_data <- threshold_base %>% filter(heat_causality == "促进")
 
-# 7.1.1 分组比较 (Quantile) - 占比
-promote_grouped_ratio <- promote_data %>%
-  mutate(invest_group = cut(green_ratio, breaks = quantile(green_ratio, probs = seq(0, 1, 0.2), na.rm = TRUE),
+# 7.1.1e 分组比较 (Quantile) - 投资强度 (新)
+promote_grouped_intensity <- promote_data %>%
+  filter(!is.na(invest_intensity)) %>%
+  mutate(invest_group = cut(invest_intensity, breaks = quantile(invest_intensity, probs = seq(0, 1, 0.2), na.rm = TRUE),
                             labels = c("Q1", "Q2", "Q3", "Q4", "Q5"), include.lowest = TRUE)) %>%
   group_by(invest_group) %>%
   summarise(n = n(), mean_eff = mean(effect_index_heat_sif, na.rm = TRUE),
             se_eff = sd(effect_index_heat_sif, na.rm = TRUE) / sqrt(n()), .groups = "drop")
 
-p_quant_p_ratio <- ggplot(promote_grouped_ratio, aes(x = invest_group, y = mean_eff)) +
-  geom_col(fill = "#4575b4", alpha = 0.7, width = 0.6) +
+p_quant_p_intensity <- ggplot(promote_grouped_intensity, aes(x = invest_group, y = mean_eff)) +
+  geom_col(fill = "#4daf4a", alpha = 0.7, width = 0.6) +
   geom_errorbar(aes(ymin = mean_eff - se_eff, ymax = mean_eff + se_eff), width = 0.3, linewidth = 2) +
-  geom_text(aes(label = paste0("n=", n)), vjust = -0.5, size = 20, fontface = "bold") +
-  labs(title = "不同投资占比下的平均促进效应强度", x = "占比分位数", y = "平均促进效应强度") +
-  theme_minimal(base_size = 60) + theme(plot.title = element_text(face = "bold", size = 80, hjust = 0.5), axis.title = element_text(face = "bold", size = 60), axis.text = element_text(size = 50))
-ggsave("data_proc/threshold_quantile_promote.png", p_quant_p_ratio, width = 20, height = 15, dpi = 300)
+  geom_text(aes(label = paste0("n=", n)), vjust = -0.5, size = 15, fontface = "bold") +
+  labs(title = "不同投资强度(万元/公顷)下的平均促进效应强度", x = "强度分位数", y = "平均促进效应强度") +
+  theme_minimal(base_size = 30) + 
+  theme(plot.title = element_text(face = "bold", size = 35, hjust = 0.5))
+ggsave("data_proc/threshold_quantile_promote_intensity.png", p_quant_p_intensity, width = 12, height = 9, dpi = 300)
 
 # 7.1.1b 分组比较 (Quantile) - 绝对值
 promote_grouped_abs <- promote_data %>%
@@ -378,6 +413,60 @@ try({
     labs(title = "促进效应阈值 (原始金额尺度)", x = "绿化投资额 (亿元)", y = "促进效应强度") +
     theme_minimal(base_size = 60) + theme(plot.title = element_text(face = "bold", size = 80, hjust = 0.5), axis.title = element_text(face = "bold", size = 60), axis.text = element_text(size = 50))
   ggsave("data_proc/threshold_segmented_linear_promote_abs.png", p_seg_lin_p_abs, width = 20, height = 15, dpi = 300)
+})
+
+# --- 7.1.3 投资强度阈值分析 (新) ---
+cat("\n7.1.3 投资强度 (万元/公顷) 阈值分析\n")
+
+# 7.1.3a 原始尺度分段回归
+try({
+  lm_p_int_lin <- lm(effect_index_heat_sif ~ invest_intensity, data = promote_data %>% filter(!is.na(invest_intensity)))
+  seg_p_int_lin <- segmented(lm_p_int_lin, seg.Z = ~invest_intensity, npsi = 1)
+  bp_p_int_lin <- seg_p_int_lin$psi[1, "Est."]
+  
+  promote_data_int <- promote_data %>% filter(!is.na(invest_intensity))
+  promote_data_int$fitted_lin <- predict(seg_p_int_lin)
+  
+  p_seg_lin_int <- ggplot(promote_data_int, aes(x = invest_intensity, y = effect_index_heat_sif)) +
+    geom_point(alpha = 0.4, color = "#4daf4a", size = 8) + 
+    geom_line(aes(y = fitted_lin), color = "black", linewidth = 4) +
+    geom_vline(xintercept = bp_p_int_lin, linetype = "dashed", color = "#d73027", linewidth = 3) +
+    annotate("text", x = bp_p_int_lin + 5, y = max(promote_data_int$effect_index_heat_sif)*0.8, 
+             label = paste0("阈值 ≈ ", round(bp_p_int_lin, 1), " 万元/公顷"), color = "#d73027", size = 25, fontface = "bold") +
+    labs(title = "投资强度阈值 (原始尺度)", x = "单位面积绿化投资 (万元/公顷)", y = "促进效应强度") +
+    theme_minimal(base_size = 60) + 
+    theme(plot.title = element_text(face = "bold", size = 80, hjust = 0.5))
+  
+  ggsave("data_proc/threshold_segmented_linear_intensity.png", p_seg_lin_int, width = 20, height = 15, dpi = 300)
+})
+
+# 7.1.3b Log-Log 尺度分段回归
+try({
+  # 预处理：确保横轴和纵轴均大于0以便取log
+  promote_data_loglog <- promote_data %>% 
+    filter(!is.na(invest_intensity), invest_intensity > 0, effect_index_heat_sif > 0) %>%
+    mutate(
+      log_y = log10(effect_index_heat_sif),
+      log_x = log10(invest_intensity)
+    )
+  
+  lm_p_int_log <- lm(log_y ~ log_x, data = promote_data_loglog)
+  seg_p_int_log <- segmented(lm_p_int_log, seg.Z = ~log_x, npsi = 1)
+  bp_p_int_log_val <- 10^seg_p_int_log$psi[1, "Est."] # 转回原始单位
+  
+  promote_data_loglog$fitted_log <- predict(seg_p_int_log)
+  
+  p_seg_loglog_int <- ggplot(promote_data_loglog, aes(x = log_x, y = log_y)) +
+    geom_point(alpha = 0.4, color = "#4daf4a", size = 8) + 
+    geom_line(aes(y = fitted_log), color = "black", linewidth = 4) +
+    geom_vline(xintercept = log10(bp_p_int_log_val), linetype = "dashed", color = "#d73027", linewidth = 3) +
+    annotate("text", x = log10(bp_p_int_log_val) + 0.1, y = max(promote_data_loglog$log_y)*0.8, 
+             label = paste0("阈值 ≈ ", round(bp_p_int_log_val, 1), " 万元/公顷"), color = "#d73027", size = 25, fontface = "bold") +
+    labs(title = "投资强度阈值 (Log-Log 尺度)", x = "log10(单位面积投资 万元/公顷)", y = "log10(促进效应强度)") +
+    theme_minimal(base_size = 60) + 
+    theme(plot.title = element_text(face = "bold", size = 80, hjust = 0.5))
+  
+  ggsave("data_proc/threshold_segmented_loglog_intensity.png", p_seg_loglog_int, width = 20, height = 15, dpi = 300)
 })
 
 # --- 7.2 抑制效应 (Inhibiting Effect) 深度分析 ---
