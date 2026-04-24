@@ -1,21 +1,15 @@
-# ============================================================================
+# Statement ----
 # 基于每日VPD的热事件分析
-# ============================================================================
 
-pacman::p_load(dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, 
-               tidyr, showtext, rEDM, sf, rnaturalearth, rnaturalearthdata)
+# Preparation ----
+pacman::p_load(
+  dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, tidyr, 
+  showtext, rEDM, sf, rnaturalearth, rnaturalearthdata, knitr
+)
 showtext_auto()
 
-cat("\n", rep("=", 70), "\n", sep = "")
-cat("              VPD热事件分析\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
-# ============================================================================
-# 1. 读取每日气象数据
-# ============================================================================
-
-cat("【1. 读取每日数据】\n")
-
+# Data ----
+# 函数：读取每日气象数据。
 read_one_meteo_daily <- function(path) {
   station_id <- str_extract(basename(path), "\\d+")
   read_csv(path, skip = 1, show_col_types = FALSE, na = c("", "NA")) %>%
@@ -24,6 +18,7 @@ read_one_meteo_daily <- function(path) {
     return()
 }
 
+# 气象数据文件列表。
 meteo_file_list <- list.files(
   path = "data_raw/meteo_data_1961-2023",
   pattern = "\\.txt$",
@@ -31,7 +26,8 @@ meteo_file_list <- list.files(
 ) %>%
   .[!grepl("sta_lonlat_china.txt", .)]
 
-# 读取SIF站点列表
+# 读取SIF站点列表。
+# Bug: 为何SIF数据只有2000-2023年？LHSIF是否覆盖更多年份？
 meteo_sif_data <- read.csv("data_raw/meteo_stat_SIF_data.csv") %>% 
   tibble() %>% 
   rename_with(~tolower(.x)) %>%
@@ -39,13 +35,15 @@ meteo_sif_data <- read.csv("data_raw/meteo_stat_SIF_data.csv") %>%
   filter(!is.na(sif)) %>% 
   mutate(meteo_stat_id = as.character(meteo_stat_id))
 
+# 目标站点。
 target_stations <- unique(meteo_sif_data$meteo_stat_id)
-
 cat("目标站点数:", length(target_stations), "\n")
 
-# 读取每日数据
+# 读取每日数据。
 meteo_data_daily <- map(
-  meteo_file_list[str_extract(basename(meteo_file_list), "\\d+") %in% target_stations],
+  meteo_file_list[
+    str_extract(basename(meteo_file_list), "\\d+") %in% target_stations
+  ],
   read_one_meteo_daily
 ) %>%
   list_rbind() %>%
@@ -56,28 +54,20 @@ meteo_data_daily <- map(
     month = month(date),
     day = day(date)
   ) %>%
-  filter(month %in% 5:9)  # 扩展到5-9月
+  # Bug：仅分析每年的5-9月是否合理？
+  filter(year %in% c(unique(meteo_sif_data$year)), month %in% 5:9)
 
-cat("读取完成，数据行数:", nrow(meteo_data_daily), "\n\n")
-
-# ============================================================================
-# 2. 计算每日VPD
-# ============================================================================
-
-cat("【2. 计算每日VPD】\n")
-
+# 计算每日VPD。
 meteo_data_daily_vpd <- meteo_data_daily %>%
   mutate(
     # 饱和水汽压 (kPa)
     svp = 0.6112 * exp((17.67 * tavg) / (tavg + 243.5)),
-    
     # 实际水汽压 (kPa)
     avp = (rh / 100) * svp,
-    
     # VPD (kPa)
     vpd = svp - avp
   ) %>%
-  # 数据质量控制
+  # 数据质量控制。
   mutate(
     vpd = case_when(
       vpd < 0 ~ NA_real_,
@@ -85,8 +75,7 @@ meteo_data_daily_vpd <- meteo_data_daily %>%
       is.na(tavg) | is.na(rh) ~ NA_real_,
       TRUE ~ vpd
     )
-  ) %>%
-  filter(!is.na(vpd))
+  )
 
 # VPD统计
 vpd_stats <- meteo_data_daily_vpd %>%
@@ -129,49 +118,23 @@ p_vpd_dist <- ggplot(meteo_data_daily_vpd, aes(x = vpd)) +
     y = "频数"
   ) +
   theme_minimal()
-
 print(p_vpd_dist)
 
-# ============================================================================
-# 3. 定义热事件阈值
-# ============================================================================
+# 定义热事件阈值：基于文献的绝对阈值。
+# Bug：是否需要基于不同阈值做敏感性分析？
+# 2.0 kPa是常用的高VPD阈值。
+vpd_threshold <- 2.0  
 
-cat("\n【3. 定义热事件阈值】\n")
-
-# 方法1：基于百分位数（推荐）
-vpd_threshold_p90 <- vpd_stats$q90  # 90th百分位
-vpd_threshold_p95 <- vpd_stats$q95  # 95th百分位
-
-# 方法2：基于文献的绝对阈值
-vpd_threshold_abs <- 2.0  # 2.0 kPa是常用的高VPD阈值
-
-# 选择使用的阈值
-VPD_THRESHOLD <- vpd_threshold_p90  # 使用90th百分位
-
-cat("使用的VPD热事件阈值:", round(VPD_THRESHOLD, 3), "kPa\n")
-cat("  (对应第", 90, "百分位)\n\n")
-
-cat("其他参考阈值:\n")
-cat("  P95 =", round(vpd_threshold_p95, 3), "kPa\n")
-cat("  绝对阈值 =", vpd_threshold_abs, "kPa\n\n")
-
-# ============================================================================
-# 4. 识别每日热事件并构建月度指标
-# ============================================================================
-
-cat("【4. 构建月度VPD热事件指标】\n")
-
-# 每日标记热事件
+# 识别每日热事件并构建月度指标。
 meteo_data_daily_events <- meteo_data_daily_vpd %>%
   mutate(
     # 是否为热事件
-    is_heat_event = vpd > VPD_THRESHOLD,
-    
-    # 热事件强度（超过阈值的部分）
-    heat_intensity = pmax(vpd - VPD_THRESHOLD, 0)
+    is_heat_event = vpd > vpd_threshold,
+    # 热事件强度（超过阈值的部分）。
+    heat_intensity = pmax(vpd - vpd_threshold, 0)
   )
 
-# 月度汇总
+# 月度汇总：每个月的胁迫指标和SIF。
 monthly_heat_metrics <- meteo_data_daily_events %>%
   group_by(meteo_stat_id, year, month) %>%
   summarise(
@@ -181,23 +144,12 @@ monthly_heat_metrics <- meteo_data_daily_events %>%
     vpd_max = max(vpd, na.rm = TRUE),
     vpd_sd = sd(vpd, na.rm = TRUE),
     
-    # 热事件频次
+    # 热事件频次和频率。
     heat_event_days = sum(is_heat_event, na.rm = TRUE),
-    heat_event_freq = heat_event_days / n_days,  # 热事件日数比例
+    heat_event_freq = heat_event_days / n_days, 
     
-    # 热事件强度
-    heat_intensity_sum = sum(heat_intensity, na.rm = TRUE),  # 累积强度
-    heat_intensity_mean = mean(heat_intensity[is_heat_event], na.rm = TRUE),  # 平均强度
-    
-    # 组合指标1：频次 × 强度
-    heat_index_v1 = heat_event_freq * heat_intensity_sum,
-    
-    # 组合指标2：事件日数 × 平均强度
-    heat_index_v2 = heat_event_days * ifelse(is.finite(heat_intensity_mean), 
-                                             heat_intensity_mean, 0),
-    
-    # 组合指标3：加权综合指数
-    # HI = α × (标准化频次) + β × (标准化强度)
+    # 热事件强度：计算超过阈值的累计强度。
+    heat_over_sum = sum(heat_intensity, na.rm = TRUE),  
     .groups = "drop"
   ) %>%
   # 标准化处理（按站点）
@@ -205,57 +157,19 @@ monthly_heat_metrics <- meteo_data_daily_events %>%
   mutate(
     # Z-score标准化
     heat_freq_z = scale(heat_event_freq)[,1],
-    heat_intensity_z = scale(heat_intensity_sum)[,1],
-    
-    # 综合热事件指数（权重可调整）
+    heat_intensity_z = scale(heat_over_sum)[,1],
+    # 综合热事件指数（Bug：权重可调整）。
     heat_index_composite = 0.5 * heat_freq_z + 0.5 * heat_intensity_z
   ) %>%
+  filter(n() > 30) %>% 
   ungroup()
-
-cat("月度热事件指标构建完成\n")
-cat("站点数:", length(unique(monthly_heat_metrics$meteo_stat_id)), "\n")
-cat("数据行数:", nrow(monthly_heat_metrics), "\n\n")
-
-# 热事件统计
-heat_event_summary <- monthly_heat_metrics %>%
-  summarise(
-    总月数 = n(),
-    有热事件的月份 = sum(heat_event_days > 0),
-    平均热事件天数 = mean(heat_event_days),
-    最大热事件天数 = max(heat_event_days),
-    平均热事件频率 = mean(heat_event_freq) * 100
-  )
-
-cat("热事件月度统计:\n")
-print(heat_event_summary)
-cat("\n")
-
-# ============================================================================
-# 5. 合并SIF数据
-# ============================================================================
-
-cat("【5. 合并SIF数据】\n")
 
 # 月度SIF数据
 sif_monthly <- meteo_sif_data %>%
   group_by(meteo_stat_id, year, month) %>%
   summarise(sif = mean(sif, na.rm = TRUE), .groups = "drop")
 
-# 合并
-data_heat_sif <- monthly_heat_metrics %>%
-  inner_join(sif_monthly, by = c("meteo_stat_id", "year", "month")) %>%
-  filter(!is.na(sif))
-
-cat("合并后数据行数:", nrow(data_heat_sif), "\n")
-cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
-
-# ============================================================================
-# 6. 去趋势处理
-# ============================================================================
-
-cat("【6. 去趋势处理】\n")
-
-# 安全的去趋势函数
+# 函数：安全去趋势
 safe_detrend <- function(x, time_idx) {
   # 检查是否有足够的非NA值
   valid_data <- !is.na(x)
@@ -277,7 +191,11 @@ safe_detrend <- function(x, time_idx) {
   })
 }
 
-data_heat_sif_detrended <- data_heat_sif %>%
+# 合并热胁迫和SIF数据并去趋势。
+data_heat_sif <- monthly_heat_metrics %>%
+  inner_join(sif_monthly, by = c("meteo_stat_id", "year", "month")) %>%
+  filter(!is.na(sif)) %>% 
+  # 去趋势。
   group_by(meteo_stat_id) %>%
   arrange(year, month) %>%
   mutate(
@@ -287,24 +205,19 @@ data_heat_sif_detrended <- data_heat_sif %>%
     sif_detrended = safe_detrend(sif, time_idx),
     heat_index_composite_detrended = safe_detrend(heat_index_composite, time_idx),
     heat_event_freq_detrended = safe_detrend(heat_event_freq, time_idx),
-    heat_intensity_sum_detrended = safe_detrend(heat_intensity_sum, time_idx),
-    vpd_mean_detrended = safe_detrend(vpd_mean, time_idx)
+    heat_intensity_sum_detrended = safe_detrend(heat_over_sum, time_idx)
   ) %>%
   ungroup() %>%
   # 过滤掉去趋势失败的站点
   group_by(meteo_stat_id) %>%
-  filter(sum(!is.na(sif_detrended)) >= 10) %>%  # 至少10个有效数据点
+  # Bug: 保留多少个有效数据点？
+  filter(sum(!is.na(sif_detrended)) >= 30) %>%  
   ungroup()
 
-cat("去趋势完成\n")
-cat("保留的站点数:", length(unique(data_heat_sif_detrended$meteo_stat_id)), "\n")
-cat("数据行数:", nrow(data_heat_sif_detrended), "\n\n")
+cat("合并后数据行数:", nrow(data_heat_sif), "\n")
+cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
 
-# ============================================================================
-# 7. CCM分析：热事件指标 → SIF
-# ============================================================================
-
-cat("【7. CCM分析：热事件指标 → SIF】\n\n")
+# CCM ----
 
 perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
   
@@ -318,7 +231,6 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
       heat_intensity = heat_intensity_sum_detrended,
       vpd_mean = vpd_mean_detrended
     ) %>%
-    filter(!is.na(sif), !is.na(heat_index)) %>%  # 移除NA
     as.data.frame()
   
   n_data <- nrow(station_data)
@@ -478,9 +390,8 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
     effect_type <- case_when(
       !heat_causes_sif ~ "无因果",
       is.na(mean_smap_coef) ~ "S-map失败",
-      mean_smap_coef > 0.001 ~ "促进效应(+)",
-      mean_smap_coef < -0.001 ~ "抑制效应(-)",
-      TRUE ~ "效应极弱"
+      mean_smap_coef > 0 ~ "促进效应(+)",
+      mean_smap_coef < 0 ~ "抑制效应(-)"
     )
     
     effect_stability <- case_when(
@@ -661,7 +572,7 @@ p_heat_spatial <- ggplot() +
     subtitle = paste0(
       "抑制效应: ", sum(spatial_heat_sif$combined_label == "热事件抑制SIF"), " | ",
       "促进效应: ", sum(spatial_heat_sif$combined_label == "热事件促进SIF"), " | ",
-      "VPD阈值 = ", round(VPD_THRESHOLD, 2), " kPa"
+      "VPD阈值 = ", round(vpd_threshold, 2), " kPa"
     ),
     x = "经度",
     y = "纬度",
