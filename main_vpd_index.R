@@ -220,7 +220,6 @@ cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
 # CCM ----
 
 perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
-  
   station_data <- data %>%
     filter(meteo_stat_id == station_id) %>%
     arrange(year, month) %>%
@@ -450,14 +449,7 @@ ccm_results_heat <- map_dfr(seq_along(all_stations_heat), function(i) {
 
 cat("\n成功分析的站点数:", nrow(ccm_results_heat), "/", length(all_stations_heat), "\n\n")
 
-# ============================================================================
 # 8. 结果统计
-# ============================================================================
-
-cat(rep("=", 70), "\n", sep = "")
-cat("                   统计结果\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
 # 热事件指数 → SIF
 heat_to_sif_results <- ccm_results_heat %>%
   filter(heat_causes_sif)
