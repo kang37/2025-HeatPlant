@@ -218,44 +218,30 @@ cat("合并后数据行数:", nrow(data_heat_sif), "\n")
 cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
 
 # CCM ----
-
-perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
-  station_data <- data %>%
+# 函数：进行CCM分析。
+perform_ccm_heat_sif <- function(
+    station_id, data, min_points = 30, 
+    sif_col = "sif_detrended", heat_col = "heat_index_composite_detrended", 
+    tp_x = 0) {
+  # 提取特定站点的数据。
+  station_data_ccm <- data %>%
     filter(meteo_stat_id == station_id) %>%
     arrange(year, month) %>%
-    select(
-      sif = sif_detrended,
-      heat_index = heat_index_composite_detrended,
-      heat_freq = heat_event_freq_detrended,
-      heat_intensity = heat_intensity_sum_detrended,
-      vpd_mean = vpd_mean_detrended
-    ) %>%
+    select(sif = all_of(sif_col), heat_index = all_of(heat_col)) %>%
+    filter(!is.na(sif), !is.na(heat_index)) %>% 
+    mutate(time = row_number(), .before = 1) %>% 
     as.data.frame()
   
-  n_data <- nrow(station_data)
-  
-  if (n_data < min_points) {
-    return(NULL)
-  }
+  # 如果样本不足，返回空值。
+  n_data <- nrow(station_data_ccm)
+  if (n_data < min_points) return(NULL)
   
   tryCatch({
-    
-    station_data_ccm <- data.frame(
-      time = 1:n_data,
-      sif = station_data$sif,
-      heat_index = station_data$heat_index,
-      heat_freq = station_data$heat_freq,
-      heat_intensity = station_data$heat_intensity,
-      vpd_mean = station_data$vpd_mean
-    )
-    
-    lib_pred_size <- min(100, n_data)
-    
     # 确定最优E
     embed_sif <- EmbedDimension(
       dataFrame = station_data_ccm,
-      lib = paste("1", lib_pred_size),
-      pred = paste("1", lib_pred_size),
+      lib = paste("1", n_data),
+      pred = paste("1", n_data),
       columns = "sif",
       target = "sif",
       maxE = min(8, floor(n_data/10)),
@@ -264,8 +250,8 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
     
     embed_heat <- EmbedDimension(
       dataFrame = station_data_ccm,
-      lib = paste("1", lib_pred_size),
-      pred = paste("1", lib_pred_size),
+      lib = paste("1", n_data),
+      pred = paste("1", n_data),
       columns = "heat_index",
       target = "heat_index",
       maxE = min(8, floor(n_data/10)),
@@ -279,15 +265,14 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
     # CCM参数
     tau <- 1
     embedding_loss <- (E_ccm - 1) * tau
-    tp <- 0  # 同步关系
+    # Tp设置为0为同步，否则为滞后关系。
+    tp <- tp_x
     max_available_lib <- n_data - embedding_loss - tp
     
     lib_start <- max(E_ccm + 2, 10)
     lib_end <- max_available_lib
     
-    if (lib_end <= lib_start || lib_end < 15) {
-      return(NULL)
-    }
+    if (lib_end <= lib_start || lib_end < 15) return(NULL)
     
     lib_step <- max(2, floor((lib_end - lib_start) / 10))
     libSizes_str <- paste(lib_start, lib_end, lib_step)
@@ -305,19 +290,6 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
       showPlot = FALSE
     )
     
-    # CCM: 平均VPD → SIF（对比）
-    ccm_vpd_to_sif <- CCM(
-      dataFrame = station_data_ccm,
-      E = E_ccm,
-      Tp = tp,
-      columns = "vpd_mean",
-      target = "sif",
-      libSizes = libSizes_str,
-      sample = 50,
-      random = TRUE,
-      showPlot = FALSE
-    )
-    
     # 汇总
     ccm_summary_heat <- ccm_heat_to_sif %>%
       rename(lib_size = LibSize) %>%
@@ -328,20 +300,8 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
         .groups = "drop"
       )
     
-    ccm_summary_vpd <- ccm_vpd_to_sif %>%
-      rename(lib_size = LibSize) %>%
-      group_by(lib_size) %>%
-      summarise(
-        rho_mean = mean(`vpd_mean:sif`, na.rm = TRUE),
-        rho_sd = sd(`vpd_mean:sif`, na.rm = TRUE),
-        .groups = "drop"
-      )
-    
     final_rho_heat <- ccm_summary_heat$rho_mean[nrow(ccm_summary_heat)]
-    final_rho_vpd <- ccm_summary_vpd$rho_mean[nrow(ccm_summary_vpd)]
-    
     trend_heat <- cor(ccm_summary_heat$lib_size, ccm_summary_heat$rho_mean)
-    trend_vpd <- cor(ccm_summary_vpd$lib_size, ccm_summary_vpd$rho_mean)
     
     # S-map分析
     smap_heat <- SMap(
@@ -383,14 +343,12 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
     
     heat_causes_sif <- (final_rho_heat > ccm_threshold_rho & 
                           trend_heat > ccm_threshold_trend)
-    vpd_causes_sif <- (final_rho_vpd > ccm_threshold_rho & 
-                         trend_vpd > ccm_threshold_trend)
     
     effect_type <- case_when(
       !heat_causes_sif ~ "无因果",
       is.na(mean_smap_coef) ~ "S-map失败",
-      mean_smap_coef > 0 ~ "促进效应(+)",
-      mean_smap_coef < 0 ~ "抑制效应(-)"
+      mean_smap_coef > 0 ~ "促进",
+      mean_smap_coef < 0 ~ "抑制"
     )
     
     effect_stability <- case_when(
@@ -414,15 +372,9 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
       effect_type_heat = effect_type,
       effect_stability_heat = effect_stability,
       
-      # VPD均值 → SIF（对比）
-      rho_vpd_to_sif = final_rho_vpd,
-      trend_vpd_to_sif = trend_vpd,
-      vpd_causes_sif = vpd_causes_sif,
-      
       # 保存数据
       smap_coefficients_heat = list(smap_coef_heat),
-      ccm_summary_heat = list(ccm_summary_heat),
-      ccm_summary_vpd = list(ccm_summary_vpd)
+      ccm_summary_heat = list(ccm_summary_heat)
     )
     
   }, error = function(e) {
@@ -431,8 +383,8 @@ perform_ccm_heat_sif <- function(station_id, data, min_points = 30) {
   })
 }
 
-# 批量分析
-all_stations_heat <- data_heat_sif_detrended %>%
+# 批量分析。
+all_stations_heat <- data_heat_sif %>%
   group_by(meteo_stat_id) %>%
   summarise(n = n()) %>%
   filter(n >= 30) %>%
@@ -444,7 +396,7 @@ ccm_results_heat <- map_dfr(seq_along(all_stations_heat), function(i) {
   if (i %% 10 == 0) {
     cat("已完成:", i, "/", length(all_stations_heat), "\n")
   }
-  perform_ccm_heat_sif(all_stations_heat[i], data_heat_sif_detrended, min_points = 30)
+  perform_ccm_heat_sif(all_stations_heat[i], data_heat_sif, min_points = 30)
 })
 
 cat("\n成功分析的站点数:", nrow(ccm_results_heat), "/", length(all_stations_heat), "\n\n")
@@ -461,13 +413,6 @@ print(table(heat_to_sif_results$effect_type_heat))
 cat("效应稳定性:\n")
 print(table(heat_to_sif_results$effect_stability_heat))
 cat("\n")
-
-# 对比VPD均值
-vpd_to_sif_results <- ccm_results_heat %>%
-  filter(vpd_causes_sif)
-
-cat("【VPD均值 → SIF (对比)】\n")
-cat("有因果关系的站点数:", nrow(vpd_to_sif_results), "\n\n")
 
 # 效应指数统计
 if (nrow(heat_to_sif_results) > 0) {
@@ -489,31 +434,7 @@ if (nrow(heat_to_sif_results) > 0) {
   cat("\n")
 }
 
-# 对比表
-comparison_heat_vpd <- tibble(
-  指标 = c("有因果站点数", "抑制效应站点", "促进效应站点"),
-  热事件指数 = c(
-    nrow(heat_to_sif_results),
-    sum(heat_to_sif_results$effect_type_heat == "抑制效应(-)", na.rm = TRUE),
-    sum(heat_to_sif_results$effect_type_heat == "促进效应(+)", na.rm = TRUE)
-  ),
-  VPD均值 = c(
-    nrow(vpd_to_sif_results),
-    NA,
-    NA
-  )
-)
-
-cat("【热事件指数 vs VPD均值对比】\n")
-print(comparison_heat_vpd)
-cat("\n")
-
-# ============================================================================
 # 9. 空间可视化
-# ============================================================================
-
-cat("【9. 空间可视化】\n")
-
 # 读取坐标
 station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
   rename_with(~tolower(.x)) %>%
@@ -526,13 +447,13 @@ spatial_heat_sif <- ccm_results_heat %>%
   left_join(station_coords, by = "meteo_stat_id") %>%
   filter(!is.na(longitude), !is.na(latitude)) %>%
   mutate(
-    effect_strength = abs(effect_index_heat),
-    combined_label = case_when(
-      !heat_causes_sif ~ "无因果",
-      effect_type_heat == "促进效应(+)" ~ "热事件促进SIF",
-      effect_type_heat == "抑制效应(-)" ~ "热事件抑制SIF",
-      TRUE ~ "效应不明"
-    )
+    effect_strength = abs(effect_index_heat)
+    # combined_label = case_when(
+    #   !heat_causes_sif ~ "无因果",
+    #   effect_type_heat == "促进效应(+)" ~ "热事件促进SIF",
+    #   effect_type_heat == "抑制效应(-)" ~ "热事件抑制SIF",
+    #   TRUE ~ "效应不明"
+    # )
   )
 
 cat("有坐标的站点数:", nrow(spatial_heat_sif), "\n\n")
@@ -544,26 +465,19 @@ p_heat_spatial <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
   geom_point(
     data = spatial_heat_sif,
-    aes(x = longitude, y = latitude,
-        color = combined_label,
-        size = effect_strength),
+    aes(x = longitude, y = latitude, color = effect_type_heat, size = effect_strength),
     alpha = 0.7
   ) +
   scale_color_manual(
-    values = c(
-      "热事件促进SIF" = "#4575b4",
-      "热事件抑制SIF" = "#d73027",
-      "无因果" = "#999999",
-      "效应不明" = "#fee090"
-    ),
+    values = c("促进" = "#4575b4", "抑制" = "#d73027", "无因果" = "#999999"),
     name = "因果效应"
   ) +
   scale_size_continuous(range = c(1, 8), name = "效应强度\n|∂|") +
   labs(
     title = "VPD热事件指数对SIF的因果影响",
     subtitle = paste0(
-      "抑制效应: ", sum(spatial_heat_sif$combined_label == "热事件抑制SIF"), " | ",
-      "促进效应: ", sum(spatial_heat_sif$combined_label == "热事件促进SIF"), " | ",
+      "抑制效应: ", sum(spatial_heat_sif$effect_type_heat == "抑制"), " | ",
+      "促进效应: ", sum(spatial_heat_sif$effect_type_heat == "促进"), " | ",
       "VPD阈值 = ", round(vpd_threshold, 2), " kPa"
     ),
     x = "经度",
@@ -615,63 +529,4 @@ if (nrow(spatial_heat_sif_sig) > 0) {
   
   print(p_heat_facet)
 }
-
-# ============================================================================
-# 10. 对比分析：热事件指数 vs VPD均值
-# ============================================================================
-
-cat("\n【10. 热事件指数 vs VPD均值对比】\n\n")
-
-# 计算相关性
-comparison_cor <- ccm_results_heat %>%
-  filter(!is.na(rho_heat_to_sif), !is.na(rho_vpd_to_sif)) %>%
-  summarise(
-    cor_rho = cor(rho_heat_to_sif, rho_vpd_to_sif),
-    n_both_causal = sum(heat_causes_sif & vpd_causes_sif),
-    n_only_heat = sum(heat_causes_sif & !vpd_causes_sif),
-    n_only_vpd = sum(!heat_causes_sif & vpd_causes_sif),
-    mean_rho_heat = mean(rho_heat_to_sif[heat_causes_sif]),
-    mean_rho_vpd = mean(rho_vpd_to_sif[vpd_causes_sif])
-  )
-
-cat("CCM强度相关性（热事件指数 vs VPD均值）:", 
-    round(comparison_cor$cor_rho, 3), "\n\n")
-
-cat("因果关系对比:\n")
-cat("  两者都有因果:", comparison_cor$n_both_causal, "站点\n")
-cat("  仅热事件指数有因果:", comparison_cor$n_only_heat, "站点\n")
-cat("  仅VPD均值有因果:", comparison_cor$n_only_vpd, "站点\n\n")
-
-cat("平均CCM强度:\n")
-cat("  热事件指数:", round(comparison_cor$mean_rho_heat, 3), "\n")
-cat("  VPD均值:", round(comparison_cor$mean_rho_vpd, 3), "\n\n")
-
-# 散点图对比
-p_comparison_scatter <- ggplot(ccm_results_heat, 
-                               aes(x = rho_vpd_to_sif, y = rho_heat_to_sif)) +
-  geom_point(aes(color = heat_causes_sif & vpd_causes_sif), 
-             alpha = 0.6, size = 3) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
-  geom_smooth(method = "lm", se = TRUE, color = "blue") +
-  scale_color_manual(
-    values = c("TRUE" = "#d73027", "FALSE" = "#999999"),
-    labels = c("单方向因果", "双向因果"),
-    name = ""
-  ) +
-  labs(
-    title = "热事件指数 vs VPD均值的CCM强度对比",
-    subtitle = paste0("相关系数 r = ", round(comparison_cor$cor_rho, 3)),
-    x = "CCM强度：VPD均值 → SIF",
-    y = "CCM强度：热事件指数 → SIF",
-    caption = "红线 = 1:1参考线；蓝线 = 拟合线"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    plot.subtitle = element_text(size = 11, hjust = 0.5),
-    legend.position = "bottom"
-  )
-
-print(p_comparison_scatter)
-
 
