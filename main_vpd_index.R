@@ -227,9 +227,12 @@ perform_ccm_heat_sif <- function(
   station_data_ccm <- data %>%
     filter(meteo_stat_id == station_id) %>%
     arrange(year, month) %>%
-    select(sif = all_of(sif_col), heat_index = all_of(heat_col)) %>%
-    filter(!is.na(sif), !is.na(heat_index)) %>% 
-    mutate(time = row_number(), .before = 1) %>% 
+    group_by(year) %>% 
+    mutate(heat_index = dplyr::lag(!!sym(heat_col), n = tp_x)) %>% 
+    ungroup() %>% 
+    select(sif = all_of(sif_col), heat_index) %>%
+    filter(!is.na(sif), !is.na(heat_index)) %>%
+    mutate(time = row_number(), .before = 1) %>%
     as.data.frame()
   
   # 如果样本不足，返回空值。
@@ -318,7 +321,8 @@ perform_ccm_heat_sif <- function(
     smap_coeffs <- smap_heat$coefficients
     
     if (!is.null(smap_coeffs) && ncol(smap_coeffs) >= 2) {
-      heat_coef_col <- which(grepl("heat", colnames(smap_coeffs), ignore.case = TRUE))
+      heat_coef_col <- 
+        which(grepl("heat", colnames(smap_coeffs), ignore.case = TRUE))
       
       if (length(heat_coef_col) > 0) {
         smap_coef_heat <- smap_coeffs[, heat_coef_col[1]]
@@ -341,8 +345,10 @@ perform_ccm_heat_sif <- function(
     ccm_threshold_rho <- 0.1
     ccm_threshold_trend <- 0
     
-    heat_causes_sif <- (final_rho_heat > ccm_threshold_rho & 
-                          trend_heat > ccm_threshold_trend)
+    heat_causes_sif <- (
+      final_rho_heat > ccm_threshold_rho & 
+        trend_heat > ccm_threshold_trend
+    )
     
     effect_type <- case_when(
       !heat_causes_sif ~ "无因果",
@@ -360,6 +366,7 @@ perform_ccm_heat_sif <- function(
     # 返回结果
     tibble(
       meteo_stat_id = station_id,
+      tp = tp_x, 
       n_points = n_data,
       E = E_ccm,
       
@@ -392,16 +399,17 @@ all_stations_heat <- data_heat_sif %>%
 
 cat("准备分析", length(all_stations_heat), "个站点...\n\n")
 
-ccm_results_heat <- map_dfr(seq_along(all_stations_heat), function(i) {
-  if (i %% 10 == 0) {
-    cat("已完成:", i, "/", length(all_stations_heat), "\n")
-  }
-  perform_ccm_heat_sif(all_stations_heat[i], data_heat_sif, min_points = 30)
+# 不同Tp下各站点CCM结果。
+ccm_results_heat <- map_dfr(c(0:4), function(current_tp) {
+  # 内部循环遍历所有站点
+  map_dfr(seq_along(all_stations_heat), function(i) {
+    perform_ccm_heat_sif(
+      all_stations_heat[i], data_heat_sif, min_points = 30, tp_x = current_tp
+    )
+  })
 })
 
-cat("\n成功分析的站点数:", nrow(ccm_results_heat), "/", length(all_stations_heat), "\n\n")
-
-# 8. 结果统计
+# 结果统计 ----
 # 热事件指数 → SIF
 heat_to_sif_results <- ccm_results_heat %>%
   filter(heat_causes_sif)
@@ -446,15 +454,7 @@ station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
 spatial_heat_sif <- ccm_results_heat %>%
   left_join(station_coords, by = "meteo_stat_id") %>%
   filter(!is.na(longitude), !is.na(latitude)) %>%
-  mutate(
-    effect_strength = abs(effect_index_heat)
-    # combined_label = case_when(
-    #   !heat_causes_sif ~ "无因果",
-    #   effect_type_heat == "促进效应(+)" ~ "热事件促进SIF",
-    #   effect_type_heat == "抑制效应(-)" ~ "热事件抑制SIF",
-    #   TRUE ~ "效应不明"
-    # )
-  )
+  mutate(effect_strength = abs(effect_index_heat))
 
 cat("有坐标的站点数:", nrow(spatial_heat_sif), "\n\n")
 
