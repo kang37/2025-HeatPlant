@@ -217,6 +217,50 @@ data_heat_sif <- monthly_heat_metrics %>%
 cat("合并后数据行数:", nrow(data_heat_sif), "\n")
 cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
 
+# 各站点热事件与SIF相关图 ----
+# Bug：没有时间滞后情况下的相关性。
+# 准备输出目录。
+if (!dir.exists("data_proc/station_plots")) {
+  dir.create("data_proc/station_plots", recursive = TRUE)
+}
+
+# 获取所有站点并分组 (每页25个站点)
+all_stations <- unique(data_heat_sif$meteo_stat_id)
+stations_per_page <- 25
+num_pages <- ceiling(length(all_stations) / stations_per_page)
+
+cat("共有站点:", length(all_stations), "，将分", num_pages, "页输出...\n")
+
+for (i in 1:num_pages) {
+  start_idx <- (i - 1) * stations_per_page + 1
+  end_idx <- min(i * stations_per_page, length(all_stations))
+  current_stations <- all_stations[start_idx:end_idx]
+  
+  # 提取当前页数据
+  plot_df <- data_heat_sif %>%
+    filter(meteo_stat_id %in% current_stations)
+  
+  # 绘图
+  p <- ggplot(plot_df, aes(x = heat_index_composite_detrended, y = sif_detrended)) +
+    geom_point(alpha = 0.5, color = "steelblue", size = 1) +
+    geom_smooth(method = "lm", color = "red", se = FALSE, linewidth = 0.8) +
+    facet_wrap(~meteo_stat_id, scales = "free", ncol = 5) +
+    labs(
+      title = paste0("Heat Index vs SIF (Page ", i, "/", num_pages, ")"),
+      subtitle = "X: heat_index_composite_detrended | Y: sif_detrended",
+      x = "Heat Impact (Detrended)",
+      y = "SIF (Detrended)"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(strip.text = element_text(face = "bold", size = 8))
+  
+  # 保存
+  file_name <- sprintf("data_proc/station_plots/station_scatters_page_%02d.png", i)
+  ggsave(file_name, p, width = 15, height = 12, dpi = 150)
+  
+  if (i %% 5 == 0) cat("已完成", i, "页...\n")
+}
+
 # CCM ----
 # 函数：进行CCM分析。
 perform_ccm_heat_sif <- function(
@@ -404,7 +448,7 @@ ccm_results_heat <- map_dfr(c(0:4), function(current_tp) {
   # 内部循环遍历所有站点
   map_dfr(seq_along(all_stations_heat), function(i) {
     perform_ccm_heat_sif(
-      all_stations_heat[i], data_heat_sif, min_points = 30, tp_x = current_tp
+      all_stations_heat[i], data_heat_sif, tp_x = current_tp
     )
   })
 })
@@ -536,39 +580,4 @@ p_heat_spatial <- ggplot() +
 
 print(p_heat_spatial)
 
-# 分面地图
-spatial_heat_sif_sig <- spatial_heat_sif %>%
-  filter(combined_label %in% c("热事件促进SIF", "热事件抑制SIF"))
-
-if (nrow(spatial_heat_sif_sig) > 0) {
-  p_heat_facet <- ggplot() +
-    geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
-    geom_point(
-      data = spatial_heat_sif_sig,
-      aes(x = longitude, y = latitude,
-          color = effect_stability_heat,
-          size = effect_strength),
-      alpha = 0.8
-    ) +
-    scale_color_manual(
-      values = c("稳定" = "#1b9e77", "波动大" = "#d95f02"),
-      name = "效应稳定性"
-    ) +
-    scale_size_continuous(range = c(1, 3), name = "|∂|") +
-    facet_wrap(~ combined_label, ncol = 2) +
-    labs(
-      title = "热事件对SIF的效应：促进 vs 抑制",
-      x = "经度",
-      y = "纬度"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-      strip.text = element_text(face = "bold", size = 12),
-      legend.position = "bottom",
-      panel.background = element_rect(fill = "aliceblue", color = NA)
-    )
-  
-  print(p_heat_facet)
-}
 
