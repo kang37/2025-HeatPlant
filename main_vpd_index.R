@@ -409,41 +409,86 @@ ccm_results_heat <- map_dfr(c(0:4), function(current_tp) {
   })
 })
 
-# 结果统计 ----
-# 热事件指数 → SIF
+# 保留热事件指数导向SIF的结果。
 heat_to_sif_results <- ccm_results_heat %>%
   filter(heat_causes_sif)
 
-cat("【热事件指数 → SIF】\n")
-cat("有因果关系的站点数:", nrow(heat_to_sif_results), "\n")
-cat("效应类型分布:\n")
-print(table(heat_to_sif_results$effect_type_heat))
-cat("效应稳定性:\n")
-print(table(heat_to_sif_results$effect_stability_heat))
-cat("\n")
+# Station causal effect change Sankey ----
+# 提取所有Tp对。
+available_tps <- sort(unique(ccm_results_heat$tp))
+tp_pairs <- map(
+  1:(length(available_tps) - 1), ~ c(available_tps[.x], available_tps[.x+1])
+)
 
-# 效应指数统计
-if (nrow(heat_to_sif_results) > 0) {
-  heat_index_stats <- heat_to_sif_results %>%
-    filter(!is.na(effect_index_heat)) %>%
-    summarise(
-      n = n(),
-      mean = mean(effect_index_heat),
-      sd = sd(effect_index_heat),
-      median = median(effect_index_heat),
-      min = min(effect_index_heat),
-      max = max(effect_index_heat),
-      n_negative = sum(effect_index_heat < -0.001),
-      pct_negative = round(sum(effect_index_heat < -0.001) / n() * 100, 1)
+# 函数：作桑基图，展示各站点因果关系变化。
+plot_sankey_pair <- function(data, pair) {
+  # 定义作图样式。
+  lvls <- c("促进", "抑制", "无因果", "S-map失败")
+  cols <- c("促进" = "#E41A1C", "抑制" = "#377EB8", "无因果" = "#999999")
+  
+  # 提取Tp对。
+  tp_start <- pair[1]
+  tp_end   <- pair[2]
+  
+  # 提取这对 tp 的数据并转宽
+  pair_data <- data %>%
+    filter(tp %in% pair) %>%
+    select(meteo_stat_id, tp, effect_type_heat) %>%
+    pivot_wider(
+      id_cols = meteo_stat_id, names_from = tp, values_from = effect_type_heat
+    ) %>%
+    # 仅保留在该对中均有数据的站点
+    drop_na() %>%
+    # 转换为因子
+    mutate(
+      start_val = 
+        factor(as.character(get(as.character(tp_start))), levels = lvls),
+      end_val = 
+        factor(as.character(get(as.character(tp_end))),   levels = lvls)
     )
   
-  cat("热事件效应指数统计:\n")
-  print(heat_index_stats)
-  cat("\n")
+  # 统计频数
+  pair_summary <- pair_data %>%
+    group_by(start_val, end_val) %>%
+    summarise(n = n(), .groups = "drop")
+  
+  # 绘图
+  ggplot(pair_summary,
+         aes(axis1 = start_val, axis2 = end_val, y = n)) +
+    geom_alluvium(aes(fill = start_val), width = 1/12, alpha = 0.6) +
+    geom_stratum(width = 1/6, fill = "white", color = "grey") +
+    geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3) +
+    scale_x_discrete(limits = c(paste0("tp = ", tp_start), paste0("tp = ", tp_end)), expand = c(.1, .1)) +
+    scale_fill_manual(values = cols) +
+    labs(subtitle = paste0("流转: tp=", tp_start, " -> tp=", tp_end),
+         y = "站点数", fill = "起始性质") +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "none",
+          panel.grid = element_blank(),
+          axis.text.y = element_blank())
 }
 
-# 9. 空间可视化
-# 读取坐标
+# 批量生成并组合。
+all_plots <- map(tp_pairs, ~plot_sankey_pair(ccm_results_heat, .x))
+
+# 使用patchwork组合，每行放2个图。
+combined_plot <- wrap_plots(all_plots, ncol = 2) + 
+  plot_annotation(
+    title = "各站点因果性质演变",
+    theme = theme(plot.title = element_text(size = 18))
+  )
+
+# 结果统计 ----
+# 因果类型数量。
+print(table(ccm_results_heat$effect_type_heat))
+print(table(ccm_results_heat$effect_stability_heat))
+
+# 空间可视化
+# 地图。
+china_map <- 
+  ne_countries(country = "china", scale = "medium", returnclass = "sf")
+
+# 站点坐标。
 station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
   rename_with(~tolower(.x)) %>%
   select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
@@ -455,10 +500,6 @@ spatial_heat_sif <- ccm_results_heat %>%
   left_join(station_coords, by = "meteo_stat_id") %>%
   filter(!is.na(longitude), !is.na(latitude)) %>%
   mutate(effect_strength = abs(effect_index_heat))
-
-cat("有坐标的站点数:", nrow(spatial_heat_sif), "\n\n")
-
-china_map <- ne_countries(country = "china", scale = "medium", returnclass = "sf")
 
 # 主地图
 p_heat_spatial <- ggplot() +
@@ -490,7 +531,8 @@ p_heat_spatial <- ggplot() +
     plot.subtitle = element_text(size = 11, hjust = 0.5),
     legend.position = "right",
     panel.background = element_rect(fill = "aliceblue", color = NA)
-  )
+  ) + 
+  facet_wrap(.~ tp)
 
 print(p_heat_spatial)
 
