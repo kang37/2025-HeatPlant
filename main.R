@@ -232,6 +232,7 @@ cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
 
 tar_make()
 tar_load(data_heat_sif)
+tar_load(ccm_results_heat)
 
 # 各站点热事件与SIF相关图 ----
 # Bug：没有时间滞后情况下的相关性。
@@ -276,202 +277,6 @@ for (i in 1:num_pages) {
   
   if (i %% 5 == 0) cat("已完成", i, "页...\n")
 }
-
-# CCM ----
-# 函数：进行CCM分析。
-perform_ccm_heat_sif <- function(
-    station_id, data, min_points = 30, 
-    sif_col = "sif_detrended", heat_col = "heat_index_composite_detrended", 
-    tp_x = 0) {
-  # 提取特定站点的数据。
-  station_data_ccm <- data %>%
-    filter(meteo_stat_id == station_id) %>%
-    arrange(year, month) %>%
-    group_by(year) %>% 
-    mutate(heat_index = dplyr::lag(!!sym(heat_col), n = tp_x)) %>% 
-    ungroup() %>% 
-    select(sif = all_of(sif_col), heat_index) %>%
-    filter(!is.na(sif), !is.na(heat_index)) %>%
-    mutate(time = row_number(), .before = 1) %>%
-    as.data.frame()
-  
-  # 如果样本不足，返回空值。
-  n_data <- nrow(station_data_ccm)
-  if (n_data < min_points) return(NULL)
-  
-  tryCatch({
-    # 确定最优E
-    embed_sif <- EmbedDimension(
-      dataFrame = station_data_ccm,
-      lib = paste("1", n_data),
-      pred = paste("1", n_data),
-      columns = "sif",
-      target = "sif",
-      maxE = min(8, floor(n_data/10)),
-      showPlot = FALSE
-    )
-    
-    embed_heat <- EmbedDimension(
-      dataFrame = station_data_ccm,
-      lib = paste("1", n_data),
-      pred = paste("1", n_data),
-      columns = "heat_index",
-      target = "heat_index",
-      maxE = min(8, floor(n_data/10)),
-      showPlot = FALSE
-    )
-    
-    best_E_sif <- embed_sif$E[which.max(embed_sif$rho)]
-    best_E_heat <- embed_heat$E[which.max(embed_heat$rho)]
-    E_ccm <- max(best_E_sif, best_E_heat)
-    
-    # CCM参数
-    tau <- 1
-    embedding_loss <- (E_ccm - 1) * tau
-    # Tp设置为0为同步，否则为滞后关系。
-    tp <- tp_x
-    max_available_lib <- n_data - embedding_loss - tp
-    
-    lib_start <- max(E_ccm + 2, 10)
-    lib_end <- max_available_lib
-    
-    if (lib_end <= lib_start || lib_end < 15) return(NULL)
-    
-    lib_step <- max(2, floor((lib_end - lib_start) / 10))
-    libSizes_str <- paste(lib_start, lib_end, lib_step)
-    
-    # CCM: 热事件指数 → SIF
-    ccm_heat_to_sif <- CCM(
-      dataFrame = station_data_ccm,
-      E = E_ccm,
-      Tp = tp,
-      columns = "heat_index",
-      target = "sif",
-      libSizes = libSizes_str,
-      sample = 50,
-      random = TRUE,
-      showPlot = FALSE
-    )
-    
-    # 汇总
-    ccm_summary_heat <- ccm_heat_to_sif %>%
-      rename(lib_size = LibSize) %>%
-      group_by(lib_size) %>%
-      summarise(
-        rho_mean = mean(`heat_index:sif`, na.rm = TRUE),
-        rho_sd = sd(`heat_index:sif`, na.rm = TRUE),
-        .groups = "drop"
-      )
-    
-    final_rho_heat <- ccm_summary_heat$rho_mean[nrow(ccm_summary_heat)]
-    trend_heat <- cor(ccm_summary_heat$lib_size, ccm_summary_heat$rho_mean)
-    
-    # S-map分析
-    smap_heat <- SMap(
-      dataFrame = station_data_ccm,
-      lib = paste("1", n_data),
-      pred = paste("1", n_data),
-      E = E_ccm,
-      theta = 2,
-      columns = "heat_index",
-      target = "sif",
-      embedded = FALSE
-    )
-    
-    smap_coeffs <- smap_heat$coefficients
-    
-    if (!is.null(smap_coeffs) && ncol(smap_coeffs) >= 2) {
-      heat_coef_col <- 
-        which(grepl("heat", colnames(smap_coeffs), ignore.case = TRUE))
-      
-      if (length(heat_coef_col) > 0) {
-        smap_coef_heat <- smap_coeffs[, heat_coef_col[1]]
-      } else {
-        smap_coef_heat <- smap_coeffs[, 2]
-      }
-      
-      smap_coef_heat <- smap_coef_heat[!is.na(smap_coef_heat)]
-      
-      mean_smap_coef <- mean(smap_coef_heat, na.rm = TRUE)
-      sd_smap_coef <- sd(smap_coef_heat, na.rm = TRUE)
-      
-    } else {
-      mean_smap_coef <- NA
-      sd_smap_coef <- NA
-      smap_coef_heat <- NA
-    }
-    
-    # 判断因果
-    ccm_threshold_rho <- 0.1
-    ccm_threshold_trend <- 0
-    
-    heat_causes_sif <- (
-      final_rho_heat > ccm_threshold_rho & 
-        trend_heat > ccm_threshold_trend
-    )
-    
-    effect_type <- case_when(
-      !heat_causes_sif ~ "无因果",
-      is.na(mean_smap_coef) ~ "S-map失败",
-      mean_smap_coef > 0 ~ "促进",
-      mean_smap_coef < 0 ~ "抑制"
-    )
-    
-    effect_stability <- case_when(
-      is.na(mean_smap_coef) | is.na(sd_smap_coef) ~ "未知",
-      abs(mean_smap_coef) > sd_smap_coef ~ "稳定",
-      TRUE ~ "波动大"
-    )
-    
-    # 返回结果
-    tibble(
-      meteo_stat_id = station_id,
-      tp = tp_x, 
-      n_points = n_data,
-      E = E_ccm,
-      
-      # 热事件指数 → SIF
-      rho_heat_to_sif = final_rho_heat,
-      trend_heat_to_sif = trend_heat,
-      heat_causes_sif = heat_causes_sif,
-      effect_index_heat = mean_smap_coef,
-      effect_index_sd_heat = sd_smap_coef,
-      effect_type_heat = effect_type,
-      effect_stability_heat = effect_stability,
-      
-      # 保存数据
-      smap_coefficients_heat = list(smap_coef_heat),
-      ccm_summary_heat = list(ccm_summary_heat)
-    )
-    
-  }, error = function(e) {
-    message("Error in station ", station_id, ": ", e$message)
-    return(NULL)
-  })
-}
-
-# 批量分析。
-all_stations_heat <- data_heat_sif %>%
-  group_by(meteo_stat_id) %>%
-  summarise(n = n()) %>%
-  filter(n >= 30) %>%
-  pull(meteo_stat_id)
-
-cat("准备分析", length(all_stations_heat), "个站点...\n\n")
-
-# 不同Tp下各站点CCM结果。
-ccm_results_heat <- map_dfr(c(0:4), function(current_tp) {
-  # 内部循环遍历所有站点
-  map_dfr(seq_along(all_stations_heat), function(i) {
-    perform_ccm_heat_sif(
-      all_stations_heat[i], data_heat_sif, tp_x = current_tp
-    )
-  })
-}) %>% 
-  # 加入站点的经纬度数据。
-  left_join(station_coords, by = "meteo_stat_id") %>%
-  filter(!is.na(longitude), !is.na(latitude)) %>%
-  mutate(effect_strength = abs(effect_index_heat))
 
 # Station causal effect change Sankey ----
 # 提取所有Tp对。
@@ -584,8 +389,8 @@ p_heat_spatial <- ggplot() +
 cat("【正在构建全维度 ccm_results_heat 对象 (自包含版)...】\n")
 
 # 1. 变量富集：气候带匹配 ----
-if (!require("terra")) install.packages("terra")
 koppen_raster <- terra::rast("data_raw/koppen_geiger_tif/1991_2020/koppen_geiger_0p1.tif")
+
 koppen_lookup <- c(
   "1" = "Af", "2" = "Am", "3" = "As", "4" = "Aw", "5" = "BWh", "6" = "BWk", "7" = "BSh", "8" = "BSk",
   "9" = "Csa", "10" = "Csb", "11" = "Csc", "12" = "Cwa", "13" = "Cwb", "14" = "Cwc", "15" = "Cfa",
@@ -597,57 +402,13 @@ ccm_results_heat$koppen_code <- as.character(terra::extract(koppen_raster, pts)[
 ccm_results_heat$koppen_class <- koppen_lookup[ccm_results_heat$koppen_code]
 
 # 2. 变量富集：绿化投资指标匹配 (独立集成) ----
-cat("正在读取经济与绿化数据...\n")
-
-# A. 2020年绿化投资 (万元)
-green_invest_2020 <- read_csv("data_raw/green_invest/中国城市数据.csv", show_col_types = FALSE) %>%
-  dplyr::select(city_name = 城市名称, invest = 园林绿化_2020) %>%
-  mutate(invest = as.numeric(invest),
-         city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市")))
-
-# B. 2020年GDP (万元)
-gdp_data_2020 <- read_excel("data_raw/中国城市数据库1990-2023.xlsx") %>%
-  filter(年份 == 2020) %>%
-  dplyr::select(city_name = 城市, gdp = "地区生产总值(万元)") %>%
-  mutate(gdp = as.numeric(gdp))
-
-# C. 2020年绿地面积 (公顷)
-# 请注意：此处使用了您之前修正过的列名，如果仍有空格请微调
-green_area_2020 <- read_excel("data_raw/城市绿地面积数据_2003-2023.xlsx", sheet = "绿地面积_明细数据") %>%
-  filter(年份 == 2020) %>%
-  dplyr::select(city_name = 城市, area_green = `绿地面积(公顷)`) %>%
-  mutate(area_green = as.numeric(area_green),
-         city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市")))
-
-# D. 空间匹配站点到城市
-china_cities_shp <- st_read("data_raw/china_cities/city.shp", quiet = TRUE) %>% st_transform(crs = 4326)
-pts_sf <- st_as_sf(ccm_results_heat %>% distinct(meteo_stat_id, longitude, latitude), 
-                   coords = c("longitude", "latitude"), crs = 4326)
-station_city_map <- pts_sf %>% 
-  st_join(china_cities_shp, join = st_within) %>% 
-  as.data.frame() %>%
-  dplyr::select(meteo_stat_id, city_name = ct_name)
-
-# E. 指标整合
-invest_metrics <- station_city_map %>%
-  left_join(green_invest_2020, by = "city_name") %>%
-  left_join(gdp_data_2020, by = "city_name") %>%
-  left_join(green_area_2020, by = "city_name") %>%
-  mutate(
-    invest_ratio = invest / gdp * 100,
-    intensity_green = invest / area_green
-  ) %>%
-  dplyr::select(meteo_stat_id, invest_ratio, intensity_green)
-
-ccm_results_heat <- ccm_results_heat %>%
+ccm_results_heat_var <- ccm_results_heat %>%
   left_join(invest_metrics, by = "meteo_stat_id") %>%
   mutate(tp_label = paste0("Lag ", tp))
 
 # 3. 简洁可视化 ----
-cat("生成整合分析图表...\n")
-
 # A. 气候带分析
-p_climate <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_class), effect_type_heat %in% c("促进", "抑制")),
+p_climate <- ggplot(ccm_results_heat_var %>% filter(!is.na(koppen_class), effect_type_heat %in% c("促进", "抑制")),
                     aes(x = koppen_class, y = rho_heat_to_sif, fill = effect_type_heat)) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
   facet_wrap(~tp_label) +
@@ -656,7 +417,7 @@ p_climate <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_class), effect_typ
   theme_minimal(base_size = 20) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 # B. 投资强度分析
-p_invest <- ggplot(ccm_results_heat %>% filter(effect_type_heat %in% c("促进", "抑制")),
+p_invest <- ggplot(ccm_results_heat_var %>% filter(effect_type_heat %in% c("促进", "抑制")),
                    aes(x = effect_type_heat, y = intensity_green, fill = effect_type_heat)) +
   geom_boxplot(alpha = 0.7) +
   scale_y_log10() +
@@ -673,7 +434,7 @@ dev.off()
 # 因果效应强度分布 ----
 ## 根据时间延迟 ----
 # 预处理绘图数据
-plot_data_rho <- ccm_results_heat %>%
+plot_data_rho <- ccm_results_heat_var %>%
   filter(!is.na(effect_type_heat)) %>%
   mutate(
     tp_label = paste0("Time Lag = ", tp, "月"),
