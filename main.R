@@ -10,85 +10,13 @@ pacman::p_load(
 showtext_auto()
 
 # Data ----
-# 函数：读取每日气象数据。
-read_one_meteo_daily <- function(path) {
-  station_id <- str_extract(basename(path), "\\d+")
-  read_csv(path, skip = 1, show_col_types = FALSE, na = c("", "NA")) %>%
-    mutate(across(where(is.numeric), ~ ifelse(.x >= 999990, NA_real_, .x))) %>%
-    mutate(meteo_stat_id = station_id, .before = 1) %>%
-    return()
-}
-
-# 气象数据文件列表。
-meteo_file_list <- list.files(
-  path = "data_raw/meteo_data_1961-2023",
-  pattern = "\\.txt$",
-  full.names = TRUE
-) %>%
-  .[!grepl("sta_lonlat_china.txt", .)]
-
-# 读取SIF站点列表。
-# Bug: 为何SIF数据只有2000-2023年？LHSIF是否覆盖更多年份？
-meteo_sif_data <- read.csv("data_raw/meteo_stat_SIF_data.csv") %>% 
-  tibble() %>% 
-  rename_with(~tolower(.x)) %>%
-  rename(meteo_stat_id = meteo_stat) %>% 
-  filter(!is.na(sif)) %>% 
-  mutate(meteo_stat_id = as.character(meteo_stat_id))
-
-# 目标站点。
-target_stations <- unique(meteo_sif_data$meteo_stat_id)
-cat("目标站点数:", length(target_stations), "\n")
+tar_make()
+tar_load(data_heat_sif)
+tar_load(ccm_results_heat)
 
 # 地图。
 china_map <- 
   ne_countries(country = "china", scale = "medium", returnclass = "sf")
-
-# 站点坐标。
-# Bug：可以合并它和target_stations？
-station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
-  rename_with(~tolower(.x)) %>%
-  select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
-  distinct(meteo_stat_id, .keep_all = TRUE) %>%
-  mutate(meteo_stat_id = as.character(meteo_stat_id))
-
-# 读取每日数据。
-meteo_data_daily <- map(
-  meteo_file_list[
-    str_extract(basename(meteo_file_list), "\\d+") %in% target_stations
-  ],
-  read_one_meteo_daily
-) %>%
-  list_rbind() %>%
-  rename_with(~ tolower(.x)) %>%
-  mutate(
-    date = as.Date(date),
-    year = year(date),
-    month = month(date),
-    day = day(date)
-  ) %>%
-  # Bug：仅分析每年的5-9月是否合理？
-  filter(year %in% c(unique(meteo_sif_data$year)), month %in% 5:9)
-
-# 计算每日VPD。
-meteo_data_daily_vpd <- meteo_data_daily %>%
-  mutate(
-    # 饱和水汽压 (kPa)
-    svp = 0.6112 * exp((17.67 * tavg) / (tavg + 243.5)),
-    # 实际水汽压 (kPa)
-    avp = (rh / 100) * svp,
-    # VPD (kPa)
-    vpd = svp - avp
-  ) %>%
-  # 数据质量控制。
-  mutate(
-    vpd = case_when(
-      vpd < 0 ~ NA_real_,
-      vpd > 10 ~ NA_real_,
-      is.na(tavg) | is.na(rh) ~ NA_real_,
-      TRUE ~ vpd
-    )
-  )
 
 # VPD统计
 vpd_stats <- meteo_data_daily_vpd %>%
@@ -132,107 +60,6 @@ p_vpd_dist <- ggplot(meteo_data_daily_vpd, aes(x = vpd)) +
   ) +
   theme_minimal()
 print(p_vpd_dist)
-
-# 定义热事件阈值：基于文献的绝对阈值。
-# Bug：是否需要基于不同阈值做敏感性分析？
-# 2.0 kPa是常用的高VPD阈值。
-vpd_threshold <- 2.0  
-
-# 识别每日热事件并构建月度指标。
-meteo_data_daily_events <- meteo_data_daily_vpd %>%
-  mutate(
-    # 是否为热事件
-    is_heat_event = vpd > vpd_threshold,
-    # 热事件强度（超过阈值的部分）。
-    heat_intensity = pmax(vpd - vpd_threshold, 0)
-  )
-
-# 月度汇总：每个月的胁迫指标和SIF。
-monthly_heat_metrics <- meteo_data_daily_events %>%
-  group_by(meteo_stat_id, year, month) %>%
-  summarise(
-    # 基础统计
-    n_days = n(),
-    vpd_mean = mean(vpd, na.rm = TRUE),
-    vpd_max = max(vpd, na.rm = TRUE),
-    vpd_sd = sd(vpd, na.rm = TRUE),
-    
-    # 热事件频次和频率。
-    heat_event_days = sum(is_heat_event, na.rm = TRUE),
-    heat_event_freq = heat_event_days / n_days, 
-    
-    # 热事件强度：计算超过阈值的累计强度。
-    heat_over_sum = sum(heat_intensity, na.rm = TRUE),  
-    .groups = "drop"
-  ) %>%
-  # 标准化处理（按站点）
-  group_by(meteo_stat_id) %>%
-  mutate(
-    # Z-score标准化
-    heat_freq_z = scale(heat_event_freq)[,1],
-    heat_intensity_z = scale(heat_over_sum)[,1],
-    # 综合热事件指数（Bug：权重可调整）。
-    heat_index_composite = 0.5 * heat_freq_z + 0.5 * heat_intensity_z
-  ) %>%
-  filter(n() > 30) %>% 
-  ungroup()
-
-# 月度SIF数据
-sif_monthly <- meteo_sif_data %>%
-  group_by(meteo_stat_id, year, month) %>%
-  summarise(sif = mean(sif, na.rm = TRUE), .groups = "drop")
-
-# 函数：安全去趋势
-safe_detrend <- function(x, time_idx) {
-  # 检查是否有足够的非NA值
-  valid_data <- !is.na(x)
-  n_valid <- sum(valid_data)
-  
-  if (n_valid < 3) {
-    # 数据点太少，返回原值或NA
-    return(rep(NA_real_, length(x)))
-  }
-  
-  tryCatch({
-    # 拟合线性模型
-    model <- lm(x ~ time_idx)
-    # 返回残差
-    residuals(model)
-  }, error = function(e) {
-    # 如果出错，返回NA
-    rep(NA_real_, length(x))
-  })
-}
-
-# 合并热胁迫和SIF数据并去趋势。
-data_heat_sif <- monthly_heat_metrics %>%
-  inner_join(sif_monthly, by = c("meteo_stat_id", "year", "month")) %>%
-  filter(!is.na(sif)) %>% 
-  # 去趋势。
-  group_by(meteo_stat_id) %>%
-  arrange(year, month) %>%
-  mutate(
-    time_idx = row_number(),
-    
-    # 安全去趋势
-    sif_detrended = safe_detrend(sif, time_idx),
-    heat_index_composite_detrended = safe_detrend(heat_index_composite, time_idx),
-    heat_event_freq_detrended = safe_detrend(heat_event_freq, time_idx),
-    heat_intensity_sum_detrended = safe_detrend(heat_over_sum, time_idx)
-  ) %>%
-  ungroup() %>%
-  # 过滤掉去趋势失败的站点
-  group_by(meteo_stat_id) %>%
-  # Bug: 保留多少个有效数据点？
-  filter(sum(!is.na(sif_detrended)) >= 30) %>%  
-  ungroup()
-
-cat("合并后数据行数:", nrow(data_heat_sif), "\n")
-cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
-
-tar_make()
-tar_load(data_heat_sif)
-tar_load(ccm_results_heat)
 
 # 各站点热事件与SIF相关图 ----
 # Bug：没有时间滞后情况下的相关性。
@@ -337,11 +164,12 @@ plot_sankey_pair <- function(data, pair) {
 all_plots <- map(tp_pairs, ~plot_sankey_pair(ccm_results_heat, .x))
 
 # 使用patchwork组合，每行放2个图。
-combined_plot <- wrap_plots(all_plots, ncol = 2) + 
+combined_plot <- wrap_plots(all_plots, nrow = 1) + 
   plot_annotation(
     title = "各站点因果性质演变",
     theme = theme(plot.title = element_text(size = 18))
   )
+combined_plot
 
 # 结果统计 ----
 # 因果类型数量。
@@ -349,6 +177,8 @@ print(table(ccm_results_heat$effect_type_heat))
 print(table(ccm_results_heat$effect_stability_heat))
 
 # 空间可视化
+# Bug: 应该放在哪里？
+vpd_threshold <- 2
 # 主地图
 p_heat_spatial <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
@@ -381,13 +211,9 @@ p_heat_spatial <- ggplot() +
     panel.background = element_rect(fill = "aliceblue", color = NA)
   ) + 
   facet_wrap(.~ tp)
+p_heat_spatial
 
-# ============================================================================
 # 全维度整合分析 (气候带 + 投资) ----
-# ============================================================================
-
-cat("【正在构建全维度 ccm_results_heat 对象 (自包含版)...】\n")
-
 # 1. 变量富集：气候带匹配 ----
 koppen_raster <- terra::rast("data_raw/koppen_geiger_tif/1991_2020/koppen_geiger_0p1.tif")
 
@@ -397,31 +223,42 @@ koppen_lookup <- c(
   "16" = "Cfb", "17" = "Cfc", "18" = "Dsa", "19" = "Dsb", "20" = "Dsc", "21" = "Dsd", "22" = "Dwa",
   "23" = "Dwb", "24" = "Dwc", "25" = "Dwd", "26" = "Dfa", "27" = "Dfb", "28" = "Dfc", "29" = "Dfd", "30" = "ET", "31" = "EF"
 )
-pts <- terra::vect(ccm_results_heat, geom = c("longitude", "latitude"), crs = "EPSG:4326")
-ccm_results_heat$koppen_code <- as.character(terra::extract(koppen_raster, pts)[,2])
-ccm_results_heat$koppen_class <- koppen_lookup[ccm_results_heat$koppen_code]
+pts <- 
+  terra::vect(
+    ccm_results_heat, geom = c("longitude", "latitude"), crs = "EPSG:4326"
+  )
+ccm_results_heat$koppen_code <- 
+  as.character(terra::extract(koppen_raster, pts)[,2])
+ccm_results_heat$koppen_class <- 
+  koppen_lookup[ccm_results_heat$koppen_code]
 
-# 2. 变量富集：绿化投资指标匹配 (独立集成) ----
+# 变量富集：绿化投资指标匹配 (独立集成) ----
 ccm_results_heat_var <- ccm_results_heat %>%
   left_join(invest_metrics, by = "meteo_stat_id") %>%
   mutate(tp_label = paste0("Lag ", tp))
 
 # 3. 简洁可视化 ----
 # A. 气候带分析
-p_climate <- ggplot(ccm_results_heat_var %>% filter(!is.na(koppen_class), effect_type_heat %in% c("促进", "抑制")),
-                    aes(x = koppen_class, y = rho_heat_to_sif, fill = effect_type_heat)) +
+p_climate <- ggplot(
+  ccm_results_heat_var %>% 
+    filter(!is.na(koppen_class), effect_type_heat %in% c("促进", "抑制")),
+  aes(x = koppen_class, y = rho_heat_to_sif, fill = effect_type_heat)
+) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
-  facet_wrap(~tp_label) +
+  facet_wrap(~tp_label, nrow = 1) +
   scale_fill_manual(values = c("促进" = "#E41A1C", "抑制" = "#377EB8")) +
   labs(title = "不同气候带下的因果强度分布", x = "柯本气候分类", y = "因果强度 (Rho)", fill = "性质") +
-  theme_minimal(base_size = 20) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme_minimal(base_size = 20) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 # B. 投资强度分析
-p_invest <- ggplot(ccm_results_heat_var %>% filter(effect_type_heat %in% c("促进", "抑制")),
-                   aes(x = effect_type_heat, y = intensity_green, fill = effect_type_heat)) +
+p_invest <- ggplot(
+  ccm_results_heat_var %>% filter(effect_type_heat %in% c("促进", "抑制")),
+  aes(x = effect_type_heat, y = invest_pa_park, fill = effect_type_heat)
+) +
   geom_boxplot(alpha = 0.7) +
   scale_y_log10() +
-  facet_wrap(~tp_label) +
+  facet_wrap(~tp_label, nrow = 1) +
   scale_fill_manual(values = c("促进" = "#E41A1C", "抑制" = "#377EB8")) +
   labs(title = "投资强度与因果性质的关系", x = "因果性质", y = "单位绿地投资 (万元/公顷, log)", fill = "性质") +
   theme_minimal(base_size = 20)

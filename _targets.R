@@ -6,7 +6,7 @@ tar_option_set(
   packages = c(
     "tibble", "dplyr", "ggplot2", "lubridate", "purrr", "data.table", "stringr",
     "readr", "tidyr", "showtext", "rEDM", "sf", "rnaturalearth", 
-    "rnaturalearthdata", "knitr"
+    "rnaturalearthdata", "knitr", "readxl"
   )
 )
 
@@ -227,6 +227,7 @@ list(
       .[!grepl("sta_lonlat_china.txt", .)]
   ),
   # 读取SIF站点列表。
+  # Bug: 为何SIF数据只有2000-2023年？LHSIF是否覆盖更多年份？
   tar_target(
     meteo_sif_data, 
     read.csv("data_raw/meteo_stat_SIF_data.csv") %>% 
@@ -255,6 +256,7 @@ list(
         month = month(date),
         day = day(date)
       ) %>%
+      # Bug：仅分析每年的5-9月是否合理？
       filter(year %in% c(unique(meteo_sif_data$year)), month %in% 5:9)
   ),
   # 计算每日VPD。
@@ -283,6 +285,7 @@ list(
     monthly_heat_metrics,
     meteo_data_daily_vpd %>%
       mutate(
+        # Bug：是否需要基于不同阈值做敏感性分析？2.0 kPa是常用的高VPD阈值。
         is_heat_event = vpd > 2.0,
         heat_intensity = pmax(vpd - 2.0, 0)
       ) %>%
@@ -356,12 +359,19 @@ list(
     ) %>%
       filter(年份 == 2020) %>%
       dplyr::select(
-        city_name = 城市, area_green_tot = "绿地面积(公顷)", 
+        city_name = 城市, 
+        area_green_tot = "绿地面积(公顷)", 
         area_green_built = "建成区绿地面积(公顷)", 
         area_green_park = "公园绿地面积(公顷)"
       ) %>%
-      mutate(area_green = as.numeric(area_green),
-             city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市")))
+      mutate(
+        area_green_tot = as.numeric(area_green_tot),
+        area_green_built = as.numeric(area_green_built),
+        area_green_park = as.numeric(area_green_park),
+        city_name = ifelse(
+          str_detect(city_name, "市$"), city_name, paste0(city_name, "市")
+        )
+      )
   ), 
   # 空间站点匹配到城市。
   tar_target(
@@ -390,9 +400,24 @@ list(
       left_join(green_area_2020, by = "city_name") %>%
       mutate(
         invest_ratio = invest / gdp * 100,
-        intensity_green = invest / area_green
+        invest_pa_tot = invest / area_green_tot, 
+        invest_pa_built = invest / area_green_built, 
+        invest_pa_park = invest / area_green_park
       ) %>%
-      dplyr::select(meteo_stat_id, invest_ratio, intensity_green)
+      dplyr::select(
+        meteo_stat_id, invest_ratio, 
+        invest_pa_park, invest_pa_built, invest_pa_park
+      )
+  ), 
+  # 站点坐标。
+  # Bug：可以合并它和target_stations？
+  tar_target(
+    station_coords, 
+    read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
+      rename_with(~tolower(.x)) %>%
+      select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
+      distinct(meteo_stat_id, .keep_all = TRUE) %>%
+      mutate(meteo_stat_id = as.character(meteo_stat_id))
   ), 
   # CCM ----
   tar_target(
