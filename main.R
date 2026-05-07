@@ -4,7 +4,8 @@
 # Preparation ----
 pacman::p_load(
   dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, tidyr, 
-  showtext, rEDM, sf, rnaturalearth, rnaturalearthdata, knitr
+  showtext, rEDM, sf, rnaturalearth, rnaturalearthdata, knitr, ggalluvial,
+  patchwork
 )
 showtext_auto()
 
@@ -216,6 +217,9 @@ data_heat_sif <- monthly_heat_metrics %>%
 
 cat("合并后数据行数:", nrow(data_heat_sif), "\n")
 cat("站点数:", length(unique(data_heat_sif$meteo_stat_id)), "\n\n")
+
+tar_make()
+tar_load(data_heat_sif)
 
 # 各站点热事件与SIF相关图 ----
 # Bug：没有时间滞后情况下的相关性。
@@ -452,10 +456,6 @@ ccm_results_heat <- map_dfr(c(0:4), function(current_tp) {
     )
   })
 })
-
-# 保留热事件指数导向SIF的结果。
-heat_to_sif_results <- ccm_results_heat %>%
-  filter(heat_causes_sif)
 
 # Station causal effect change Sankey ----
 # 提取所有Tp对。
