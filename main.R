@@ -40,6 +40,18 @@ meteo_sif_data <- read.csv("data_raw/meteo_stat_SIF_data.csv") %>%
 target_stations <- unique(meteo_sif_data$meteo_stat_id)
 cat("目标站点数:", length(target_stations), "\n")
 
+# 地图。
+china_map <- 
+  ne_countries(country = "china", scale = "medium", returnclass = "sf")
+
+# 站点坐标。
+# Bug：可以合并它和target_stations？
+station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
+  rename_with(~tolower(.x)) %>%
+  select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
+  distinct(meteo_stat_id, .keep_all = TRUE) %>%
+  mutate(meteo_stat_id = as.character(meteo_stat_id))
+
 # 读取每日数据。
 meteo_data_daily <- map(
   meteo_file_list[
@@ -455,7 +467,11 @@ ccm_results_heat <- map_dfr(c(0:4), function(current_tp) {
       all_stations_heat[i], data_heat_sif, tp_x = current_tp
     )
   })
-})
+}) %>% 
+  # 加入站点的经纬度数据。
+  left_join(station_coords, by = "meteo_stat_id") %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%
+  mutate(effect_strength = abs(effect_index_heat))
 
 # Station causal effect change Sankey ----
 # 提取所有Tp对。
@@ -528,28 +544,11 @@ print(table(ccm_results_heat$effect_type_heat))
 print(table(ccm_results_heat$effect_stability_heat))
 
 # 空间可视化
-# 地图。
-china_map <- 
-  ne_countries(country = "china", scale = "medium", returnclass = "sf")
-
-# 站点坐标。
-station_coords <- read_csv("data_raw/meteo_stat_SIF_data.csv") %>%
-  rename_with(~tolower(.x)) %>%
-  select(meteo_stat_id = meteo_stat, longitude, latitude) %>%
-  distinct(meteo_stat_id, .keep_all = TRUE) %>%
-  mutate(meteo_stat_id = as.character(meteo_stat_id))
-
-# 合并
-spatial_heat_sif <- ccm_results_heat %>%
-  left_join(station_coords, by = "meteo_stat_id") %>%
-  filter(!is.na(longitude), !is.na(latitude)) %>%
-  mutate(effect_strength = abs(effect_index_heat))
-
 # 主地图
 p_heat_spatial <- ggplot() +
   geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
   geom_point(
-    data = spatial_heat_sif,
+    data = ccm_results_heat,
     aes(x = longitude, y = latitude, color = effect_type_heat, size = effect_strength),
     alpha = 0.7
   ) +
@@ -561,8 +560,8 @@ p_heat_spatial <- ggplot() +
   labs(
     title = "VPD热事件指数对SIF的因果影响",
     subtitle = paste0(
-      "抑制效应: ", sum(spatial_heat_sif$effect_type_heat == "抑制"), " | ",
-      "促进效应: ", sum(spatial_heat_sif$effect_type_heat == "促进"), " | ",
+      "抑制效应: ", sum(ccm_results_heat$effect_type_heat == "抑制"), " | ",
+      "促进效应: ", sum(ccm_results_heat$effect_type_heat == "促进"), " | ",
       "VPD阈值 = ", round(vpd_threshold, 2), " kPa"
     ),
     x = "经度",
