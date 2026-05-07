@@ -579,4 +579,39 @@ p_heat_spatial <- ggplot() +
 
 print(p_heat_spatial)
 
+# 因果效应强度分布 ----
+## 根据时间延迟 ----
+# 预处理绘图数据
+plot_data_rho <- ccm_results_heat %>%
+  filter(!is.na(effect_type_heat)) %>%
+  mutate(
+    tp_label = paste0("Time Lag = ", tp, "月"),
+    effect_type = factor(effect_type_heat, 
+                         levels = c("促进", "抑制", "无因果", "S-map失败"))
+  )
+
+# 我们关注有因果关系的站点 (促进和抑制)
+p_rho_dist <- ggplot(plot_data_rho %>% filter(effect_type %in% c("促进", "抑制")), 
+                     aes(x = rho_heat_to_sif, fill = effect_type)) +
+  geom_density(alpha = 0.6, color = "white") +
+  facet_wrap(~tp_label, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = c("促进" = "#E41A1C", "抑制" = "#377EB8")) +
+  labs(
+    title = "不同延迟下的因果强度 (CCM Rho) 密度分布",
+    subtitle = "对比分析促进效应与抑制效应在不同滞后时间下的强度特征",
+    x = "因果强度 (Rho)",
+    y = "密度",
+    fill = "因果性质"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    strip.text = element_text(face = "bold", size = 12),
+    legend.position = "bottom"
+  )
+
+# 保存图表
+png("data_proc/ccm_rho_density_distribution.png", width = 2000, height = 2000, res = 300)
+p_rho_dist
+dev.off()
 
