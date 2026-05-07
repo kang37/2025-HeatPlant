@@ -225,28 +225,77 @@ png("data_proc/analysis_investment_6plots.png", width = 5000, height = 4000, res
 print(plot_inv(FALSE) + labs(title="原始尺度对比") | plot_inv(TRUE) + labs(title="Log尺度对比"))
 dev.off()
 
-# 3. 断点回归 (6子图) ----
-cat("【可视化 3：正向因果效益最大化阈值分析 (6子图)】\n")
-plot_threshold <- function(v_name, label, use_log) {
-  df <- ccm_results_heat %>% filter(effect_type_heat == "促进") %>% 
-    select(x = !!sym(v_name), y = rho_heat_to_sif) %>% drop_na()
-  if (use_log) df$x <- log10(df$x + 0.001)
-  p <- ggplot(df, aes(x = x, y = y)) + geom_point(alpha = 0.3, color = "gray40") + geom_smooth(method = "lm", linetype="dashed", color="red", se=F)
+# 3. 断点回归 (Lags x Variables) ----
+cat("【可视化 3：正向因果效益最大化阈值分析 (全滞后 x 全变量)】\n")
+
+plot_threshold <- function(df_input, v_name, label, use_log) {
+  df <- df_input %>% select(x = !!sym(v_name), y = rho_heat_to_sif) %>% drop_na()
+  if (nrow(df) < 10) return(ggplot() + theme_void() + labs(subtitle = paste0(label, "\n(样本数不足)")))
+  
+  if (use_log) {
+    df <- df %>% filter(x > 0)
+    df$x <- log10(df$x)
+  }
+  
+  # 初始线性模型
+  fit_lm <- lm(y ~ x, data = df)
+  p <- ggplot(df, aes(x = x, y = y)) + 
+    geom_point(alpha = 0.3, color = "gray40", size = 0.8) + 
+    geom_smooth(method = "lm", linetype="dashed", color="red", se=F, linewidth = 0.5)
+  
   try({
-    fit <- segmented(lm(y ~ x, data = df), seg.Z = ~x)
-    p <- p + geom_line(aes(y = predict(fit)), color = "blue", linewidth = 1.5) +
-      geom_vline(xintercept = fit$psi[2], color = "darkgreen", linewidth = 1.2) +
-      annotate("text", x = fit$psi[2], y = max(df$y)*0.9, label = paste0("T=", round(fit$psi[2], 2)), color="darkgreen", fontface="bold", size=6)
+    # 断点回归尝试
+    fit_seg <- segmented(fit_lm, seg.Z = ~x)
+    psi <- fit_seg$psi[2] # 断点估计值
+    
+    p <- p + geom_line(aes(y = predict(fit_seg)), color = "blue", linewidth = 1) +
+      geom_vline(xintercept = psi, color = "darkgreen", linetype = "solid", linewidth = 0.8) +
+      annotate("text", x = psi, y = max(df$y, na.rm=T)*0.95, 
+               label = paste0("T=", round(psi, 2)), color="darkgreen", fontface="bold", size=3.5)
   }, silent = TRUE)
-  p + labs(subtitle = paste0(label, ifelse(use_log, " (Log)", " (Raw)")), x = "投资强度", y = "Rho") + theme_minimal(base_size = 15)
+  
+  p + labs(subtitle = label, x = ifelse(use_log, "Log10 投资强度", "投资强度"), y = "Rho") + 
+    theme_minimal(base_size = 10) +
+    theme(plot.subtitle = element_text(size = 9, face = "bold"))
 }
 
-p_thr <- (plot_threshold("intensity_total", "总绿地", F) | plot_threshold("intensity_total", "总绿地", T)) /
-         (plot_threshold("intensity_built", "建成区", F) | plot_threshold("intensity_built", "建成区", T)) /
-         (plot_threshold("intensity_park",  "公园",   F) | plot_threshold("intensity_park",  "公园",   T))
+vars <- c("intensity_total", "intensity_built", "intensity_park")
+var_labels <- c("总绿地", "建成区", "公园")
+lags <- sort(unique(ccm_results_heat$tp))
 
-png("data_proc/analysis_breakpoint_6plots.png", width = 4000, height = 5000, res = 300)
-print(p_thr + plot_annotation(title = "正向因果效应强度随投资强度的响应 (断点回归)"))
+# 生成 Raw 版本的 4 (Lag) x 3 (Var) 矩阵
+cat("- 生成 Raw 断点回归矩阵...\n")
+plots_raw <- list()
+for (v_idx in seq_along(vars)) {
+  for (l in lags) {
+    df_sub <- ccm_results_heat %>% filter(effect_type_heat == "促进", tp == l)
+    p <- plot_threshold(df_sub, vars[v_idx], paste0(var_labels[v_idx], " Lag ", l), FALSE)
+    plots_raw[[length(plots_raw) + 1]] <- p
+  }
+}
+p_thr_raw_grid <- wrap_plots(plots_raw, ncol = length(lags)) + 
+  plot_annotation(title = "正向因果效应强度随投资强度的响应 (Raw Scale, 分滞后分析)")
+
+# 生成 Log 版本的 4 (Lag) x 3 (Var) 矩阵
+cat("- 生成 Log 断点回归矩阵...\n")
+plots_log <- list()
+for (v_idx in seq_along(vars)) {
+  for (l in lags) {
+    df_sub <- ccm_results_heat %>% filter(effect_type_heat == "促进", tp == l)
+    p <- plot_threshold(df_sub, vars[v_idx], paste0(var_labels[v_idx], " Lag ", l), TRUE)
+    plots_log[[length(plots_log) + 1]] <- p
+  }
+}
+p_thr_log_grid <- wrap_plots(plots_log, ncol = length(lags)) + 
+  plot_annotation(title = "正向因果效应强度随投资强度的响应 (Log Scale, 分滞后分析)")
+
+# 保存
+png("data_proc/analysis_breakpoint_raw_matrix.png", width = 5000, height = 3000, res = 300)
+print(p_thr_raw_grid)
+dev.off()
+
+png("data_proc/analysis_breakpoint_log_matrix.png", width = 5000, height = 3000, res = 300)
+print(p_thr_log_grid)
 dev.off()
 
 cat("\n所有深度分析已完成！请查看 data_proc/ 下的图片。\n")
