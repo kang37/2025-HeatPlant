@@ -615,3 +615,22 @@ png("data_proc/ccm_rho_density_distribution.png", width = 2000, height = 2000, r
 p_rho_dist
 dev.off()
 
+## 加入纬度 ----
+p_lat_dist <- ggplot(plot_data_rho %>% filter(effect_type %in% c("促进", "抑制")), 
+                     aes(x = latitude, y = rho_heat_to_sif, color = effect_type)) +
+  geom_point(alpha = 0.3, size = 1.2) +
+  geom_smooth(method = "loess", se = TRUE, span = 0.6, linewidth = 1.5) +
+  facet_wrap(~tp_label, ncol = 1) +
+  scale_color_manual(values = c("促进" = "#377EB8", "抑制" = "#E41A1C")) +
+  labs(
+    title = "因果强度随纬度的地理分布趋势",
+    subtitle = "展示不同延迟下，因果信号强度的南北分异 (LOESS平滑)",
+    x = "纬度 (Latitude)",
+    y = "因果强度 (CCM Rho)",
+    color = "因果性质"
+  ) +
+  theme_minimal(base_size = 100) +
+  theme(plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+        legend.position = "bottom")
+ggsave("data_proc/ccm_rho_latitude_gradient.png", p_lat_dist, width = 20, height = 32, dpi = 300)
+
