@@ -156,22 +156,41 @@ ccm_results_heat <- ccm_results_heat %>% left_join(invest_metrics, by = "meteo_s
 # 可视化分析报告 ----
 # ============================================================================
 
-# 1. 气候带效应分析 ----
-cat("【可视化 1：气候带效应分析】\n")
-p_clim_detailed <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_class), effect_type_heat %in% c("促进", "抑制")),
-                          aes(x = koppen_class, y = rho_heat_to_sif, fill = effect_type_heat)) +
-  geom_boxplot(alpha = 0.7, outlier.shape = NA) + labs(title = "细分气候带 (31类)", x = "Koppen Class", y = "Rho") +
-  theme_minimal(base_size = 20) + scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8")) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# 1. 气候带分布分析 (数量与占比) ----
+cat("【可视化 1：气候带数量与占比分析】\n")
 
-p_clim_group <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_group), effect_type_heat %in% c("促进", "抑制")),
-                       aes(x = koppen_group, y = rho_heat_to_sif, fill = effect_type_heat)) +
-  geom_boxplot(alpha = 0.7) + 
-  labs(title = "汇总气候带 (A-E)", subtitle = "A:热带 B:干旱 C:暖温 D:冷温 E:高寒", x = "Climate Group", y = "Rho") +
-  theme_minimal(base_size = 20) + scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8"))
+# A. 数量对比图 (Bar Plot)
+p_clim_bar <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_group)), 
+                     aes(x = koppen_group, fill = effect_type_heat)) +
+  geom_bar(position = "stack") +
+  facet_wrap(~tp_label, ncol = 1) +
+  scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8", "无因果"="#999999", "S-map失败"="#FF7F00")) +
+  labs(title = "各气候带因果类型数量统计", 
+       x = "气候区 (A:热带 B:干旱 C:暖温 D:冷温 E:高寒)", 
+       y = "站点数量", fill = "因果性质") +
+  theme_minimal(base_size = 20) +
+  theme(legend.position = "bottom", plot.title = element_text(face="bold", hjust=0.5))
 
-png("data_proc/analysis_climate_zones.png", width = 3000, height = 4000, res = 300)
-print(p_clim_detailed / p_clim_group)
+# B. 占比图 (Pie Chart)
+# 计算每个 tp 下的占比
+pie_data <- ccm_results_heat %>%
+  group_by(tp_label, effect_type_heat) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(tp_label) %>%
+  mutate(prop = n / sum(n))
+
+p_clim_pie <- ggplot(pie_data, aes(x = "", y = prop, fill = effect_type_heat)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  facet_wrap(~tp_label) +
+  scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8", "无因果"="#999999", "S-map失败"="#FF7F00")) +
+  labs(title = "因果类型全局占比分布", x = NULL, y = NULL, fill = "类型") +
+  theme_void(base_size = 20) +
+  theme(plot.title = element_text(face="bold", hjust=0.5), legend.position = "bottom")
+
+# 保存图片
+png("data_proc/analysis_climate_distribution.png", width = 3000, height = 4000, res = 300)
+print(p_clim_bar / p_clim_pie + plot_layout(heights = c(2, 1)))
 dev.off()
 
 # 2. 投资强度矩阵分析 (6子图) ----
