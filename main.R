@@ -171,27 +171,39 @@ p_clim_bar <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_group)),
   theme_minimal(base_size = 20) +
   theme(legend.position = "bottom", plot.title = element_text(face="bold", hjust=0.5))
 
-# B. 占比图 (Pie Chart)
-# 计算每个 tp 下的占比
-pie_data <- ccm_results_heat %>%
-  group_by(tp_label, effect_type_heat) %>%
+# B. 占比图 (Pie Chart) - 16子图矩阵 ----
+cat("- 生成 16 子图因果占比矩阵...\n")
+
+# 计算 4 tp x 4 Climate 的交叉占比
+pie_data_grid <- ccm_results_heat %>%
+  filter(!is.na(koppen_group), koppen_group %in% c("A", "B", "C", "D")) %>%
+  group_by(tp_label, koppen_group, effect_type_heat) %>%
   summarise(n = n(), .groups = "drop") %>%
-  group_by(tp_label) %>%
+  group_by(tp_label, koppen_group) %>%
   mutate(prop = n / sum(n))
 
-p_clim_pie <- ggplot(pie_data, aes(x = "", y = prop, fill = effect_type_heat)) +
-  geom_bar(stat = "identity", width = 1) +
+p_clim_pie_grid <- ggplot(pie_data_grid, aes(x = "", y = prop, fill = effect_type_heat)) +
+  geom_bar(stat = "identity", width = 1, color = "white", linewidth = 0.2) +
   coord_polar("y", start = 0) +
-  facet_wrap(~tp_label) +
+  facet_grid(tp_label ~ koppen_group) +
   scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8", "无因果"="#999999", "S-map失败"="#FF7F00")) +
-  labs(title = "因果类型全局占比分布", x = NULL, y = NULL, fill = "类型") +
-  theme_void(base_size = 20) +
-  theme(plot.title = element_text(face="bold", hjust=0.5), legend.position = "bottom")
+  labs(title = "因果类型占比矩阵 (16子图)", 
+       subtitle = "行: 时间延迟 (Lag 0-3) | 列: 气候带 (A:热带 B:干旱 C:暖温 D:冷温)",
+       fill = "类型") +
+  theme_void(base_size = 18) +
+  theme(
+    plot.title = element_text(face="bold", size = 24, hjust = 0.5),
+    plot.subtitle = element_text(size = 16, hjust = 0.5, margin = margin(b=20)),
+    strip.text = element_text(face="bold", size = 15),
+    legend.position = "bottom",
+    plot.margin = margin(20, 20, 20, 20)
+  )
 
-# 保存图片
-png("data_proc/analysis_climate_distribution.png", width = 3000, height = 4000, res = 300)
-print(p_clim_bar / p_clim_pie + plot_layout(heights = c(2, 1)))
+# 保存图片 (纵向拉长以容纳 4x4 矩阵)
+png("data_proc/analysis_climate_distribution.png", width = 3200, height = 4800, res = 300)
+print(p_clim_bar / p_clim_pie_grid + plot_layout(heights = c(1, 2.5)))
 dev.off()
+
 
 # 2. 投资强度矩阵分析 (6子图) ----
 cat("【可视化 2：投资强度矩阵分析 (6子图)】\n")
