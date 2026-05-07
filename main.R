@@ -5,7 +5,7 @@
 pacman::p_load(
   dplyr, ggplot2, lubridate, purrr, data.table, stringr, readr, tidyr, 
   showtext, rEDM, sf, rnaturalearth, rnaturalearthdata, knitr, ggalluvial,
-  patchwork
+  patchwork, readxl
 )
 showtext_auto()
 
@@ -577,7 +577,98 @@ p_heat_spatial <- ggplot() +
   ) + 
   facet_wrap(.~ tp)
 
-print(p_heat_spatial)
+# ============================================================================
+# 全维度整合分析 (气候带 + 投资) ----
+# ============================================================================
+
+cat("【正在构建全维度 ccm_results_heat 对象 (自包含版)...】\n")
+
+# 1. 变量富集：气候带匹配 ----
+if (!require("terra")) install.packages("terra")
+koppen_raster <- terra::rast("data_raw/koppen_geiger_tif/1991_2020/koppen_geiger_0p1.tif")
+koppen_lookup <- c(
+  "1" = "Af", "2" = "Am", "3" = "As", "4" = "Aw", "5" = "BWh", "6" = "BWk", "7" = "BSh", "8" = "BSk",
+  "9" = "Csa", "10" = "Csb", "11" = "Csc", "12" = "Cwa", "13" = "Cwb", "14" = "Cwc", "15" = "Cfa",
+  "16" = "Cfb", "17" = "Cfc", "18" = "Dsa", "19" = "Dsb", "20" = "Dsc", "21" = "Dsd", "22" = "Dwa",
+  "23" = "Dwb", "24" = "Dwc", "25" = "Dwd", "26" = "Dfa", "27" = "Dfb", "28" = "Dfc", "29" = "Dfd", "30" = "ET", "31" = "EF"
+)
+pts <- terra::vect(ccm_results_heat, geom = c("longitude", "latitude"), crs = "EPSG:4326")
+ccm_results_heat$koppen_code <- as.character(terra::extract(koppen_raster, pts)[,2])
+ccm_results_heat$koppen_class <- koppen_lookup[ccm_results_heat$koppen_code]
+
+# 2. 变量富集：绿化投资指标匹配 (独立集成) ----
+cat("正在读取经济与绿化数据...\n")
+
+# A. 2020年绿化投资 (万元)
+green_invest_2020 <- read_csv("data_raw/green_invest/中国城市数据.csv", show_col_types = FALSE) %>%
+  dplyr::select(city_name = 城市名称, invest = 园林绿化_2020) %>%
+  mutate(invest = as.numeric(invest),
+         city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市")))
+
+# B. 2020年GDP (万元)
+gdp_data_2020 <- read_excel("data_raw/中国城市数据库1990-2023.xlsx") %>%
+  filter(年份 == 2020) %>%
+  dplyr::select(city_name = 城市, gdp = "地区生产总值(万元)") %>%
+  mutate(gdp = as.numeric(gdp))
+
+# C. 2020年绿地面积 (公顷)
+# 请注意：此处使用了您之前修正过的列名，如果仍有空格请微调
+green_area_2020 <- read_excel("data_raw/城市绿地面积数据_2003-2023.xlsx", sheet = "绿地面积_明细数据") %>%
+  filter(年份 == 2020) %>%
+  dplyr::select(city_name = 城市, area_green = `绿地面积(公顷)`) %>%
+  mutate(area_green = as.numeric(area_green),
+         city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市")))
+
+# D. 空间匹配站点到城市
+china_cities_shp <- st_read("data_raw/china_cities/city.shp", quiet = TRUE) %>% st_transform(crs = 4326)
+pts_sf <- st_as_sf(ccm_results_heat %>% distinct(meteo_stat_id, longitude, latitude), 
+                   coords = c("longitude", "latitude"), crs = 4326)
+station_city_map <- pts_sf %>% 
+  st_join(china_cities_shp, join = st_within) %>% 
+  as.data.frame() %>%
+  dplyr::select(meteo_stat_id, city_name = ct_name)
+
+# E. 指标整合
+invest_metrics <- station_city_map %>%
+  left_join(green_invest_2020, by = "city_name") %>%
+  left_join(gdp_data_2020, by = "city_name") %>%
+  left_join(green_area_2020, by = "city_name") %>%
+  mutate(
+    invest_ratio = invest / gdp * 100,
+    intensity_green = invest / area_green
+  ) %>%
+  dplyr::select(meteo_stat_id, invest_ratio, intensity_green)
+
+ccm_results_heat <- ccm_results_heat %>%
+  left_join(invest_metrics, by = "meteo_stat_id") %>%
+  mutate(tp_label = paste0("Lag ", tp))
+
+# 3. 简洁可视化 ----
+cat("生成整合分析图表...\n")
+
+# A. 气候带分析
+p_climate <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_class), effect_type_heat %in% c("促进", "抑制")),
+                    aes(x = koppen_class, y = rho_heat_to_sif, fill = effect_type_heat)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  facet_wrap(~tp_label) +
+  scale_fill_manual(values = c("促进" = "#E41A1C", "抑制" = "#377EB8")) +
+  labs(title = "不同气候带下的因果强度分布", x = "柯本气候分类", y = "因果强度 (Rho)", fill = "性质") +
+  theme_minimal(base_size = 20) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# B. 投资强度分析
+p_invest <- ggplot(ccm_results_heat %>% filter(effect_type_heat %in% c("促进", "抑制")),
+                   aes(x = effect_type_heat, y = intensity_green, fill = effect_type_heat)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_y_log10() +
+  facet_wrap(~tp_label) +
+  scale_fill_manual(values = c("促进" = "#E41A1C", "抑制" = "#377EB8")) +
+  labs(title = "投资强度与因果性质的关系", x = "因果性质", y = "单位绿地投资 (万元/公顷, log)", fill = "性质") +
+  theme_minimal(base_size = 20)
+
+# 保存 (使用 png 确保字大)
+png("data_proc/integrated_climate_invest_analysis.png", width = 2400, height = 3000, res = 300)
+print(p_climate / p_invest)
+dev.off()
 
 # 因果效应强度分布 ----
 ## 根据时间延迟 ----
