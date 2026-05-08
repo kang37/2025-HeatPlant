@@ -14,6 +14,7 @@ tar_make()
 tar_load(data_heat_sif)
 tar_load(ccm_results_heat)
 tar_load(meteo_data_daily_vpd) # Ensure vpd_stats can be calculated
+tar_load(invest_metrics)
 
 # 地图。
 china_map <- 
