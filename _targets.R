@@ -443,5 +443,75 @@ list(
       left_join(station_coords, by = "meteo_stat_id") %>%
       filter(!is.na(longitude), !is.na(latitude)) %>%
       mutate(effect_strength = abs(effect_index_heat))
+  ),
+  # 周度热胁迫指标计算 (新分支 - 仅追加) ----
+  tar_target(
+    weekly_heat_metrics,
+    meteo_data_daily_vpd %>%
+      mutate(
+        week = isoweek(date),
+        week_id = paste0(year, "-W", sprintf("%02d", week)),
+        is_heat_event = vpd > 2.0,
+        heat_intensity = pmax(vpd - 2.0, 0)
+      ) %>%
+      group_by(meteo_stat_id, year, week, week_id) %>%
+      summarise(
+        n_days = n(),
+        vpd_mean = mean(vpd, na.rm = TRUE),
+        heat_event_days = sum(is_heat_event, na.rm = TRUE),
+        heat_event_freq = heat_event_days / n_days, 
+        heat_over_sum = sum(heat_intensity, na.rm = TRUE),  
+        .groups = "drop"
+      ) %>%
+      group_by(meteo_stat_id) %>%
+      mutate(
+        heat_freq_z = scale(heat_event_freq)[,1],
+        heat_intensity_z = scale(heat_over_sum)[,1],
+        heat_index_composite = 0.5 * heat_freq_z + 0.5 * heat_intensity_z
+      ) %>%
+      ungroup()
+  ),
+  # 汇总周度SIF。
+  tar_target(
+    sif_weekly,
+    meteo_sif_data %>%
+      mutate(
+        date_obj = as.Date(as.character(date), format = "%Y%m%d"),
+        week = isoweek(date_obj),
+        week_id = paste0(year, "-W", sprintf("%02d", week))
+      ) %>%
+      group_by(meteo_stat_id, year, week, week_id) %>%
+      summarise(sif = mean(sif, na.rm = TRUE), .groups = "drop")
+  ),
+  # 合并周度数据并去趋势。
+  tar_target(
+    data_heat_sif_weekly,
+    weekly_heat_metrics %>%
+      inner_join(sif_weekly, by = c("meteo_stat_id", "year", "week", "week_id")) %>%
+      filter(!is.na(sif)) %>% 
+      group_by(meteo_stat_id) %>%
+      arrange(year, week) %>%
+      mutate(
+        time_idx = row_number(),
+        sif_detrended = safe_detrend(sif, time_idx),
+        heat_index_composite_detrended = safe_detrend(heat_index_composite, time_idx)
+      ) %>%
+      ungroup()
+  ),
+  # 20个测试站点的周度CCM分析 ----
+  tar_target(
+    test_stations_20,
+    data_heat_sif_weekly %>%
+      group_by(meteo_stat_id) %>%
+      summarise(n = n()) %>%
+      arrange(desc(n)) %>%
+      head(20) %>%
+      pull(meteo_stat_id)
   )
+  # tar_target(
+  #   ccm_results_weekly_test,
+  #   map_dfr(test_stations_20, function(sid) {
+  #     perform_ccm_heat_sif(sid, data_heat_sif_weekly, min_points = 20, tp_x = 0)
+  #   })
+  # )
 )
