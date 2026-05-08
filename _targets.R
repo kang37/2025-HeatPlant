@@ -406,7 +406,7 @@ list(
       ) %>%
       dplyr::select(
         meteo_stat_id, invest_ratio, 
-        invest_pa_park, invest_pa_built, invest_pa_park
+        invest_pa_tot, invest_pa_built, invest_pa_park
       )
   ), 
   # 站点坐标。
