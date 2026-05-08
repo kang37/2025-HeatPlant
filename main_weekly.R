@@ -77,5 +77,101 @@ ggsave("data_proc/weekly_station_completion_dist.png", p_dist_city, width = 8, h
 ggsave("data_proc/weekly_year_completion_trend.png", p_year_trend, width = 8, height = 6)
 
 # 输出完美站点清单供后续分析参考
-perfect_stations <- station_overall_stats %>% filter(perfect_record) %>% pull(meteo_stat_id)
+perfect_stations <- station_overall_stats %>% 
+  filter(perfect_record) %>% 
+  pull(meteo_stat_id)
 cat("\n完美站点前10名:", head(perfect_stations, 10), "...\n")
+
+# 8. 周度 CCM 因果分析 (针对 20 个高质量站点测试) ----
+cat("\n【周度 CCM 因果分析测试 (20 站点)】\n")
+
+# 定义 CCM 函数 (逻辑同步自 _targets.R，但适配周度数据)
+perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
+  # 准备数据：仅使用第 20-39 周
+  df_ccm <- data %>%
+    filter(meteo_stat_id == station_id, week %in% 20:39) %>%
+    arrange(year, week) %>%
+    # 滞后处理
+    mutate(heat_index = dplyr::lag(heat_index_composite_detrended, n = tp_x)) %>% 
+    select(sif = sif_detrended, heat_index) %>%
+    filter(!is.na(sif), !is.na(heat_index)) %>%
+    mutate(time = row_number(), .before = 1) %>%
+    as.data.frame()
+  
+  n_data <- nrow(df_ccm)
+  if (n_data < 30) return(NULL) # 即使是周数据，CCM 也需要足够点数
+  
+  tryCatch({
+    # 1. 确定最优 E (基于 SIF)
+    embed_sif <- EmbedDimension(dataFrame = df_ccm, columns = "sif", target = "sif", 
+                                lib = paste("1", n_data), pred = paste("1", n_data),
+                                maxE = 8, showPlot = FALSE)
+    best_E <- embed_sif$E[which.max(embed_sif$rho)]
+    
+    # 2. 运行 CCM: Heat -> SIF
+    ccm_res <- CCM(dataFrame = df_ccm, E = best_E, Tp = 0, 
+                   columns = "heat_index", target = "sif",
+                   libSizes = paste(best_E+2, n_data-best_E, 10), 
+                   sample = 50, random = TRUE, showPlot = FALSE)
+    
+    ccm_summary <- ccm_res %>%
+      group_by(LibSize) %>%
+      summarise(rho_mean = mean(`heat_index:sif`, na.rm = TRUE), .groups = "drop")
+    
+    final_rho <- ccm_summary$rho_mean[nrow(ccm_summary)]
+    trend <- cor(ccm_summary$LibSize, ccm_summary$rho_mean)
+    
+    # 3. S-map 确定因果性质
+    smap_res <- SMap(dataFrame = df_ccm, E = best_E, theta = 2,
+                     columns = "heat_index", target = "sif", embedded = FALSE)
+    
+    coeffs <- smap_res$coefficients
+    # 提取热胁迫系数 (通常在第2或第3列)
+    coef_col <- which(grepl("heat", colnames(coeffs), ignore.case = TRUE))[1]
+    if(is.na(coef_col)) coef_col <- 2
+    
+    mean_coef <- mean(coeffs[, coef_col], na.rm = TRUE)
+    
+    # 4. 判断逻辑
+    is_causal <- (final_rho > 0.1 & trend > 0)
+    effect_type <- case_when(
+      !is_causal ~ "无因果",
+      mean_coef > 0 ~ "促进",
+      mean_coef < 0 ~ "抑制",
+      TRUE ~ "未知"
+    )
+    
+    return(tibble(
+      meteo_stat_id = station_id,
+      tp = tp_x,
+      rho = final_rho,
+      trend = trend,
+      effect_type = effect_type,
+      mean_coef = mean_coef,
+      n_obs = n_data
+    ))
+  }, error = function(e) return(NULL))
+}
+
+# 选取前 20 个完美站点进行测试
+test_stations <- head(perfect_stations, 20)
+
+cat("正在运行 CCM 分析 (Lags 0-2)... 这可能需要 1-2 分钟...\n")
+results_weekly <- map_dfr(c(0, 1, 2), function(l) {
+  map_dfr(test_stations, ~perform_ccm_weekly(.x, data_heat_sif_weekly, tp_x = l))
+})
+
+# 7. 可视化测试结果
+if (nrow(results_weekly) > 0) {
+  p_res <- ggplot(results_weekly, aes(x = factor(tp), fill = effect_type)) +
+    geom_bar(position = "dodge") +
+    labs(title = "周度 CCM 测试结果 (20个高质量站点)", 
+         subtitle = "不同时间滞后 (Tp) 下的因果性质分布",
+         x = "时间滞后 (周)", y = "站点数量", fill = "因果性质") +
+    theme_minimal()
+  
+  ggsave("data_proc/weekly_ccm_test_results.png", p_res, width = 8, height = 6)
+  
+  cat("\nCCM 测试完成。结果汇总：\n")
+  print(results_weekly %>% group_by(tp, effect_type) %>% summarise(n = n(), .groups = "drop"))
+}
