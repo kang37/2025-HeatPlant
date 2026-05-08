@@ -135,10 +135,13 @@ green_invest_2020 <- read_csv("data_raw/green_invest/中国城市数据.csv", sh
   mutate(invest = as.numeric(invest),
          city_name = ifelse(str_detect(city_name, "市$"), city_name, paste0(city_name, "市")))
 
-# 空间映射：站点 -> 城市。
+# 空间映射：站点 -> 城市与省份。
 china_cities_shp <- st_read("data_raw/china_cities/city.shp", quiet = TRUE) %>% st_transform(crs = 4326)
 pts_sf <- st_as_sf(ccm_results_heat %>% distinct(meteo_stat_id, longitude, latitude), coords = c("longitude", "latitude"), crs = 4326)
-station_city_map <- pts_sf %>% st_join(china_cities_shp, join = st_within) %>% as.data.frame() %>% dplyr::select(meteo_stat_id, city_name = ct_name)
+station_city_map <- pts_sf %>% 
+  st_join(china_cities_shp, join = st_within) %>% 
+  as.data.frame() %>% 
+  dplyr::select(meteo_stat_id, city_name = ct_name, province = pr_name)
 
 # 计算强度并合入主表。
 invest_metrics <- station_city_map %>%
@@ -149,9 +152,9 @@ invest_metrics <- station_city_map %>%
     intensity_built = invest / area_built,
     intensity_park  = invest / area_park
   ) %>%
-  dplyr::select(meteo_stat_id, starts_with("intensity_"))
+  dplyr::select(meteo_stat_id, province, city_name, starts_with("intensity_"))
 
-ccm_results_heat <- ccm_results_heat %>% 
+ccm_results_heat_var <- ccm_results_heat %>% 
   left_join(invest_metrics, by = "meteo_stat_id") %>% 
   mutate(tp_label = paste0("Lag ", tp))
 
@@ -355,15 +358,108 @@ plot_mean_trend_by_tp <- function(df_sub, tp_val) {
   return(p_trend)
 }
 
-# 遍历所有滞后阶数生成趋势图
-for (l in lags) {
-  cat(paste0("- 正在生成 Tp = ", l, " 的趋势图...\n"))
-  df_sub <- analysis_df %>% filter(tp == l)
-  if (nrow(df_sub) < 10) next
+# 5. 省份维度因果占比分析 (Province x Lag Matrix) ----
+cat("【可视化 5：各省份因果关系比例分析 (省份 x 滞后 矩阵)】\n")
+
+# 计算各省份在不同 Tp 下的因果占比
+province_tp_pie_data <- ccm_results_heat_var %>%
+  filter(!is.na(province)) %>%
+  group_by(province, tp_label, effect_type_heat) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(province, tp_label) %>%
+  mutate(prop = n / sum(n))
+
+# 绘制矩阵饼图：行是省份，列是滞后
+# 由于省份较多，分两批保存以保证清晰度
+all_provinces <- sort(unique(province_tp_pie_data$province))
+prov_mid <- ceiling(length(all_provinces) / 2)
+
+draw_prov_matrix <- function(prov_list, suffix) {
+  df_sub <- province_tp_pie_data %>% filter(province %in% prov_list)
+  p <- ggplot(df_sub, aes(x = "", y = prop, fill = effect_type_heat)) +
+    geom_bar(stat = "identity", width = 1, color = "white", linewidth = 0.1) +
+    coord_polar("y", start = 0) +
+    facet_grid(province ~ tp_label) +
+    scale_fill_manual(values = c("促进"="#377EB8", "抑制"="#E41A1C", "无因果"="#999999", "S-map失败"="#FF7F00")) +
+    labs(title = "中国各省份因果类型演变矩阵",
+         subtitle = "行：省份 | 列：时间滞后 (Lag 0-4)",
+         fill = "因果性质") +
+    theme_void(base_size = 14) +
+    theme(
+      plot.title = element_text(face="bold", size = 24, hjust = 0.5, margin = margin(b=10)),
+      plot.subtitle = element_text(size = 16, hjust = 0.5, margin = margin(b=20)),
+      strip.text.y = element_text(face="bold", size = 12, angle = 0),
+      strip.text.x = element_text(face="bold", size = 12),
+      legend.position = "bottom",
+      plot.margin = margin(30, 30, 30, 30)
+    )
   
-  p_trend <- plot_mean_trend_by_tp(df_sub, l)
-  
-  png(paste0("data_proc/causal_trend_tp", l, ".png"), width = 4500, height = 2000, res = 300)
-  print(p_trend)
+  png(paste0("data_proc/analysis_province_tp_matrix_", suffix, ".png"), width = 4000, height = 6000, res = 300)
+  print(p)
   dev.off()
 }
+
+draw_prov_matrix(all_provinces[1:prov_mid], "part1")
+draw_prov_matrix(all_provinces[(prov_mid+1):length(all_provinces)], "part2")
+
+# 6. 城市维度因果占比分析 (City x Lag Matrix - Batch) ----
+cat("【可视化 6：各城市因果关系比例分析 (城市 x 滞后 分批矩阵)】\n")
+
+if (!dir.exists("data_proc/city_tp_pies")) {
+  dir.create("data_proc/city_tp_pies", recursive = TRUE)
+}
+
+# 计算每个城市的站点数量 (不随 Tp 变化)
+city_station_counts <- ccm_results_heat_var %>%
+  filter(!is.na(city_name)) %>%
+  distinct(city_name, meteo_stat_id) %>%
+  group_by(city_name) %>%
+  summarise(n_stations = n(), .groups = "drop")
+
+# 合并数据并生成带样本数的城市标签
+city_tp_pie_data <- ccm_results_heat_var %>%
+  filter(!is.na(city_name)) %>%
+  left_join(city_station_counts, by = "city_name") %>%
+  mutate(city_label = paste0(city_name, " (n=", n_stations, ")")) %>%
+  group_by(city_label, tp_label, effect_type_heat) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(city_label, tp_label) %>%
+  mutate(prop = n / sum(n))
+
+# 分批处理：每页展示 8 个城市的所有滞后 (8 rows x 5 lags)
+all_city_labels <- sort(unique(city_tp_pie_data$city_label))
+cities_per_page <- 8
+num_city_pages <- ceiling(length(all_city_labels) / cities_per_page)
+
+cat("共有城市:", length(all_city_labels), "，将分", num_city_pages, "页输出城市滞后矩阵...\n")
+
+for (p in 1:num_city_pages) {
+  start_idx <- (p - 1) * cities_per_page + 1
+  end_idx <- min(p * cities_per_page, length(all_city_labels))
+  current_cities <- all_city_labels[start_idx:end_idx]
+  
+  df_page <- city_tp_pie_data %>% filter(city_label %in% current_cities)
+  
+  p_city_tp <- ggplot(df_page, aes(x = "", y = prop, fill = effect_type_heat)) +
+    geom_bar(stat = "identity", width = 1, color = "white", linewidth = 0.1) +
+    coord_polar("y", start = 0) +
+    facet_grid(city_label ~ tp_label) +
+    scale_fill_manual(values = c("促进"="#377EB8", "抑制"="#E41A1C", "无因果"="#999999", "S-map失败"="#FF7F00")) +
+    labs(title = paste0("城市因果类型演变矩阵 (第 ", p, " 页)"),
+         subtitle = "行：城市 (n=站点数) | 列：滞后 (Lag 0-4)",
+         fill = "因果性质") +
+    theme_void(base_size = 50) +
+    theme(
+      plot.title = element_text(face="bold", hjust = 0.5, margin = margin(b=10)),
+      plot.subtitle = element_text(hjust = 0.5, margin = margin(b=20)),
+      strip.text.y = element_text(face="bold", angle = 0),
+      strip.text.x = element_text(face="bold"),
+      legend.position = "bottom",
+      plot.margin = margin(20, 20, 20, 20)
+    )
+  
+  ggsave(paste0("data_proc/city_tp_pies/analysis_city_tp_matrix_page_", p, ".png"), 
+         p_city_tp, width = 12, height = 16, dpi = 300)
+}
+
+cat("\n所有分析已完成！请查看 data_proc/ 下的图片和 city_pies/ 文件夹。\n")
