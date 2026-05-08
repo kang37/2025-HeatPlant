@@ -462,4 +462,39 @@ for (p in 1:num_city_pages) {
          p_city_tp, width = 12, height = 16, dpi = 300)
 }
 
-cat("\n所有分析已完成！请查看 data_proc/ 下的图片和 city_pies/ 文件夹。\n")
+# 7. 空间分布分析 (China Map) ----
+cat("【可视化 7：因果性质空间分布图】\n")
+
+# 准备地图数据
+china_map <- ne_countries(country = "china", scale = "medium", returnclass = "sf")
+
+# 绘制各 Tp 下的空间分布
+p_spatial_causal <- ggplot() +
+  # 底图
+  geom_sf(data = china_map, fill = "gray95", color = "gray70", linewidth = 0.3) +
+  # 站点数据点
+  geom_point(data = ccm_results_heat_var, 
+             aes(x = longitude, y = latitude, color = effect_type_heat), 
+             size = 0.8, alpha = 0.7) +
+  # 分面：按滞后阶数
+  facet_wrap(~ tp_label, ncol = 2) +
+  # 颜色方案
+  scale_color_manual(values = c("促进"="#377EB8", "抑制"="#E41A1C", "无因果"="#999999", "S-map失败"="#FF7F00")) +
+  labs(title = "中国城市热事件因果性质空间分布",
+       subtitle = "不同时间滞后 (Lag 0-4) 下的各站点表现",
+       color = "因果性质",
+       x = "经度", y = "纬度") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face="bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "bottom",
+    strip.text = element_text(face="bold"),
+    panel.grid = element_blank(),
+    axis.text = element_blank() # 地图通常不显示坐标刻度
+  )
+
+# 保存地图
+ggsave("data_proc/analysis_spatial_causality.png", p_spatial_causal, width = 10, height = 12, dpi = 300)
+
+cat("\n所有分析已完成！请查看 data_proc/ 下的图片。\n")
