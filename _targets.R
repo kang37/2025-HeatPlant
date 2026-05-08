@@ -483,18 +483,29 @@ list(
       group_by(meteo_stat_id, year, week, week_id) %>%
       summarise(sif = mean(sif, na.rm = TRUE), .groups = "drop")
   ),
-  # 合并周度数据并去趋势。
+  # 合并周度数据、补全序列并进行插值。
   tar_target(
     data_heat_sif_weekly,
     weekly_heat_metrics %>%
       inner_join(sif_weekly, by = c("meteo_stat_id", "year", "week", "week_id")) %>%
       filter(!is.na(sif)) %>% 
+      group_by(meteo_stat_id, year) %>%
+      arrange(week) %>%
+      # 1. 补全该年份内缺失的周，使序列在时间上连续但含有NA
+      complete(week = full_seq(week, 1)) %>%
+      # 2. 对 SIF 和 热胁迫指数进行线性插值 (最多连续缺失2周)
+      mutate(
+        sif_interp = zoo::na.approx(sif, maxgap = 2, na.rm = FALSE),
+        heat_index_interp = zoo::na.approx(heat_index_composite, maxgap = 2, na.rm = FALSE)
+      ) %>%
+      # 3. 仅保留插值后有效的行（去除两端无法插值的NA，并保留原有的或插值出的数据）
+      filter(!is.na(sif_interp), !is.na(heat_index_interp)) %>%
       group_by(meteo_stat_id) %>%
       arrange(year, week) %>%
       mutate(
         time_idx = row_number(),
-        sif_detrended = safe_detrend(sif, time_idx),
-        heat_index_composite_detrended = safe_detrend(heat_index_composite, time_idx)
+        sif_detrended = safe_detrend(sif_interp, time_idx),
+        heat_index_composite_detrended = safe_detrend(heat_index_interp, time_idx)
       ) %>%
       ungroup()
   ),
