@@ -151,7 +151,9 @@ invest_metrics <- station_city_map %>%
   ) %>%
   dplyr::select(meteo_stat_id, starts_with("intensity_"))
 
-ccm_results_heat <- ccm_results_heat %>% left_join(invest_metrics, by = "meteo_stat_id") %>% mutate(tp_label = paste0("Lag ", tp))
+ccm_results_heat <- ccm_results_heat %>% 
+  left_join(invest_metrics, by = "meteo_stat_id") %>% 
+  mutate(tp_label = paste0("Lag ", tp))
 
 # ============================================================================
 # 可视化分析报告 ----
@@ -161,7 +163,7 @@ ccm_results_heat <- ccm_results_heat %>% left_join(invest_metrics, by = "meteo_s
 cat("【可视化 1：气候带数量与占比分析】\n")
 
 # A. 数量对比图 (Bar Plot)
-p_clim_bar <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_group)), 
+p_clim_bar <- ggplot(ccm_results_heat_var %>% filter(!is.na(koppen_group)), 
                      aes(x = koppen_group, fill = effect_type_heat)) +
   geom_bar(position = "stack") +
   facet_wrap(~tp_label, ncol = 1) +
@@ -176,7 +178,7 @@ p_clim_bar <- ggplot(ccm_results_heat %>% filter(!is.na(koppen_group)),
 cat("- 生成 16 子图因果占比矩阵...\n")
 
 # 计算 4 tp x 4 Climate 的交叉占比
-pie_data_grid <- ccm_results_heat %>%
+pie_data_grid <- ccm_results_heat_var %>%
   filter(!is.na(koppen_group), koppen_group %in% c("A", "B", "C", "D")) %>%
   group_by(tp_label, koppen_group, effect_type_heat) %>%
   summarise(n = n(), .groups = "drop") %>%
@@ -208,7 +210,7 @@ dev.off()
 
 # 2. 投资强度矩阵分析 (6子图) ----
 cat("【可视化 2：投资强度矩阵分析 (6子图)】\n")
-invest_long <- ccm_results_heat %>%
+invest_long <- ccm_results_heat_var %>%
   filter(effect_type_heat %in% c("促进", "抑制")) %>%
   select(effect_type_heat, tp_label, intensity_total, intensity_built, intensity_park) %>%
   pivot_longer(cols = starts_with("intensity_"), names_to = "var", values_to = "val") %>%
@@ -231,7 +233,7 @@ cat("【可视化 3：因果强度随投资区间的分布分析】\n")
 
 # 数据准备：合并投资数据并计算绝对强度
 tar_load(invest_metrics)
-analysis_df <- ccm_results_heat %>% 
+analysis_df <- ccm_results_heat_var %>% 
   left_join(invest_metrics, by = "meteo_stat_id") %>%
   filter(effect_type_heat %in% c("促进", "抑制")) %>%
   mutate(abs_effect = abs(effect_index_heat))
@@ -257,7 +259,7 @@ plot_causal_dist_by_tp <- function(df_sub, tp_val) {
                             include.lowest = TRUE, labels = FALSE)) %>%
     mutate(invest_bin = factor(paste0("Q", invest_bin))) %>%
     ungroup()
-
+  
   # 绘制 Raw 尺度分布
   p_raw <- ggplot(df_long, aes(x = invest_bin, y = abs_effect, fill = effect_type_heat)) +
     geom_boxplot(outlier.shape = NA, alpha = 0.6) +
@@ -270,7 +272,7 @@ plot_causal_dist_by_tp <- function(df_sub, tp_val) {
          fill = "因果性质", color = "因果性质") +
     theme_minimal(base_size = 14) +
     theme(legend.position = "bottom", strip.text = element_text(face="bold"))
-
+  
   # 绘制 Log 尺度分布 (对投资和强度同时取对数)
   p_log <- ggplot(df_long, aes(x = invest_bin, y = abs_effect, fill = effect_type_heat)) +
     geom_boxplot(outlier.shape = NA, alpha = 0.6) +
@@ -323,7 +325,7 @@ plot_mean_trend_by_tp <- function(df_sub, tp_val) {
                             include.lowest = TRUE, labels = FALSE)) %>%
     mutate(invest_bin = factor(paste0("Q", invest_bin))) %>%
     ungroup()
-
+  
   # 计算均值和标准误
   df_stat <- df_long %>%
     group_by(invest_label, invest_bin, effect_type_heat) %>%
@@ -334,7 +336,7 @@ plot_mean_trend_by_tp <- function(df_sub, tp_val) {
       se_val = sd_val / sqrt(n),
       .groups = "drop"
     )
-
+  
   # 绘制趋势图
   p_trend <- ggplot(df_stat, aes(x = invest_bin, y = mean_val, color = effect_type_heat, group = effect_type_heat)) +
     geom_line(linewidth = 1.2) +
@@ -365,5 +367,3 @@ for (l in lags) {
   print(p_trend)
   dev.off()
 }
-
-
