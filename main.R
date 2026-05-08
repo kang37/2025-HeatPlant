@@ -225,77 +225,144 @@ png("data_proc/analysis_investment_6plots.png", width = 5000, height = 4000, res
 print(plot_inv(FALSE) + labs(title="原始尺度对比") | plot_inv(TRUE) + labs(title="Log尺度对比"))
 dev.off()
 
-# 3. 断点回归 (Lags x Variables) ----
-cat("【可视化 3：正向因果效益最大化阈值分析 (全滞后 x 全变量)】\n")
+# 3. 因果强度随投资区间分布分析 (Boxplot + Jitter) ----
+cat("【可视化 3：因果强度随投资区间的分布分析】\n")
 
-plot_threshold <- function(df_input, v_name, label, use_log) {
-  df <- df_input %>% select(x = !!sym(v_name), y = rho_heat_to_sif) %>% drop_na()
-  if (nrow(df) < 10) return(ggplot() + theme_void() + labs(subtitle = paste0(label, "\n(样本数不足)")))
+# 数据准备：合并投资数据并计算绝对强度
+tar_load(invest_metrics)
+analysis_df <- ccm_results_heat %>% 
+  left_join(invest_metrics, by = "meteo_stat_id") %>%
+  filter(effect_type_heat %in% c("促进", "抑制")) %>%
+  mutate(abs_effect = abs(effect_index_heat))
+
+# 定义绘图函数：针对特定滞后 (tp) 绘制三个变量的分布
+plot_causal_dist_by_tp <- function(df_sub, tp_val) {
+  # 将投资变量转为长格式以便分面
+  df_long <- df_sub %>%
+    select(effect_type_heat, abs_effect, invest_pa_tot, invest_pa_built, invest_pa_park) %>%
+    pivot_longer(cols = starts_with("invest_pa_"), names_to = "invest_var", values_to = "invest_val") %>%
+    mutate(invest_label = case_when(
+      invest_var == "invest_pa_tot" ~ "单位总绿地投资",
+      invest_var == "invest_pa_built" ~ "单位建成区投资",
+      invest_var == "invest_pa_park" ~ "单位公园投资"
+    )) %>%
+    drop_na(invest_val)
   
-  if (use_log) {
-    df <- df %>% filter(x > 0)
-    df$x <- log10(df$x)
-  }
+  # 对每个变量计算区间 (五分位数)
+  df_long <- df_long %>%
+    group_by(invest_label) %>%
+    mutate(invest_bin = cut(invest_val, 
+                            breaks = unique(quantile(invest_val, probs = seq(0, 1, 0.2), na.rm = TRUE)),
+                            include.lowest = TRUE, labels = FALSE)) %>%
+    mutate(invest_bin = factor(paste0("Q", invest_bin))) %>%
+    ungroup()
+
+  # 绘制 Raw 尺度分布
+  p_raw <- ggplot(df_long, aes(x = invest_bin, y = abs_effect, fill = effect_type_heat)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(aes(color = effect_type_heat), width = 0.2, alpha = 0.2, size = 0.5) +
+    facet_grid(effect_type_heat ~ invest_label, scales = "free_y") +
+    scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8")) +
+    scale_color_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8")) +
+    labs(title = paste0("因果强度随投资区间分布 (Tp = ", tp_val, ") - 原始尺度"),
+         x = "投资强度区间 (Q1-Q5)", y = "因果强度 (绝对值)",
+         fill = "因果性质", color = "因果性质") +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "bottom", strip.text = element_text(face="bold"))
+
+  # 绘制 Log 尺度分布 (对投资和强度同时取对数)
+  p_log <- ggplot(df_long, aes(x = invest_bin, y = abs_effect, fill = effect_type_heat)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(aes(color = effect_type_heat), width = 0.2, alpha = 0.2, size = 0.5) +
+    facet_grid(effect_type_heat ~ invest_label, scales = "free_y") +
+    scale_y_log10() +
+    scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8")) +
+    scale_color_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8")) +
+    labs(title = paste0("因果强度随投资区间分布 (Tp = ", tp_val, ") - 对数尺度"),
+         x = "投资强度区间 (Q1-Q5)", y = "log10(因果强度)",
+         fill = "因果性质", color = "因果性质") +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "bottom", strip.text = element_text(face="bold"))
   
-  # 初始线性模型
-  fit_lm <- lm(y ~ x, data = df)
-  p <- ggplot(df, aes(x = x, y = y)) + 
-    geom_point(alpha = 0.3, color = "gray40", size = 0.8) + 
-    geom_smooth(method = "lm", linetype="dashed", color="red", se=F, linewidth = 0.5)
-  
-  try({
-    # 断点回归尝试
-    fit_seg <- segmented(fit_lm, seg.Z = ~x)
-    psi <- fit_seg$psi[2] # 断点估计值
-    
-    p <- p + geom_line(aes(y = predict(fit_seg)), color = "blue", linewidth = 1) +
-      geom_vline(xintercept = psi, color = "darkgreen", linetype = "solid", linewidth = 0.8) +
-      annotate("text", x = psi, y = max(df$y, na.rm=T)*0.95, 
-               label = paste0("T=", round(psi, 2)), color="darkgreen", fontface="bold", size=3.5)
-  }, silent = TRUE)
-  
-  p + labs(subtitle = label, x = ifelse(use_log, "Log10 投资强度", "投资强度"), y = "Rho") + 
-    theme_minimal(base_size = 10) +
-    theme(plot.subtitle = element_text(size = 9, face = "bold"))
+  return(list(raw = p_raw, log = p_log))
 }
 
-vars <- c("intensity_total", "intensity_built", "intensity_park")
-var_labels <- c("总绿地", "建成区", "公园")
-lags <- sort(unique(ccm_results_heat$tp))
-
-# 生成 Raw 版本的 4 (Lag) x 3 (Var) 矩阵
-cat("- 生成 Raw 断点回归矩阵...\n")
-plots_raw <- list()
-for (v_idx in seq_along(vars)) {
-  for (l in lags) {
-    df_sub <- ccm_results_heat %>% filter(effect_type_heat == "促进", tp == l)
-    p <- plot_threshold(df_sub, vars[v_idx], paste0(var_labels[v_idx], " Lag ", l), FALSE)
-    plots_raw[[length(plots_raw) + 1]] <- p
-  }
+# 遍历所有滞后阶数生成图表
+lags <- sort(unique(analysis_df$tp))
+for (l in lags) {
+  cat(paste0("- 正在生成 Tp = ", l, " 的分布图...\n"))
+  df_sub <- analysis_df %>% filter(tp == l)
+  if (nrow(df_sub) < 10) next
+  
+  plots <- plot_causal_dist_by_tp(df_sub, l)
+  
+  # 保存 Tp 为单位的组合图 (Raw & Log 放在一起)
+  png(paste0("data_proc/causal_dist_tp", l, ".png"), width = 5000, height = 4000, res = 300)
+  print(plots$raw / plots$log)
+  dev.off()
 }
-p_thr_raw_grid <- wrap_plots(plots_raw, ncol = length(lags)) + 
-  plot_annotation(title = "正向因果效应强度随投资强度的响应 (Raw Scale, 分滞后分析)")
 
-# 生成 Log 版本的 4 (Lag) x 3 (Var) 矩阵
-cat("- 生成 Log 断点回归矩阵...\n")
-plots_log <- list()
-for (v_idx in seq_along(vars)) {
-  for (l in lags) {
-    df_sub <- ccm_results_heat %>% filter(effect_type_heat == "促进", tp == l)
-    p <- plot_threshold(df_sub, vars[v_idx], paste0(var_labels[v_idx], " Lag ", l), TRUE)
-    plots_log[[length(plots_log) + 1]] <- p
-  }
+# 4. 平均值 + Error Bar 趋势分析 ----
+cat("【可视化 4：因果强度随投资区间的趋势分析 (Mean + Error Bar)】\n")
+
+plot_mean_trend_by_tp <- function(df_sub, tp_val) {
+  # 长格式转换与区间划分 (复用之前的逻辑)
+  df_long <- df_sub %>%
+    select(effect_type_heat, abs_effect, invest_pa_tot, invest_pa_built, invest_pa_park) %>%
+    pivot_longer(cols = starts_with("invest_pa_"), names_to = "invest_var", values_to = "invest_val") %>%
+    mutate(invest_label = case_when(
+      invest_var == "invest_pa_tot" ~ "单位总绿地投资",
+      invest_var == "invest_pa_built" ~ "单位建成区投资",
+      invest_var == "invest_pa_park" ~ "单位公园投资"
+    )) %>%
+    drop_na(invest_val) %>%
+    group_by(invest_label) %>%
+    mutate(invest_bin = cut(invest_val, 
+                            breaks = unique(quantile(invest_val, probs = seq(0, 1, 0.2), na.rm = TRUE)),
+                            include.lowest = TRUE, labels = FALSE)) %>%
+    mutate(invest_bin = factor(paste0("Q", invest_bin))) %>%
+    ungroup()
+
+  # 计算均值和标准误
+  df_stat <- df_long %>%
+    group_by(invest_label, invest_bin, effect_type_heat) %>%
+    summarise(
+      mean_val = mean(abs_effect, na.rm = TRUE),
+      sd_val = sd(abs_effect, na.rm = TRUE),
+      n = n(),
+      se_val = sd_val / sqrt(n),
+      .groups = "drop"
+    )
+
+  # 绘制趋势图
+  p_trend <- ggplot(df_stat, aes(x = invest_bin, y = mean_val, color = effect_type_heat, group = effect_type_heat)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = mean_val - se_val, ymax = mean_val + se_val), width = 0.2, linewidth = 1) +
+    facet_wrap(~ invest_label, scales = "free_y") +
+    scale_color_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8")) +
+    labs(title = paste0("因果强度平均趋势 (Tp = ", tp_val, ")"),
+         subtitle = "Error Bar 代表标准误 (Mean ± SE)",
+         x = "投资强度区间 (Q1-Q5)", y = "因果强度均值 (绝对值)",
+         color = "因果性质") +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "bottom", strip.text = element_text(face="bold"),
+          panel.grid.minor = element_blank())
+  
+  return(p_trend)
 }
-p_thr_log_grid <- wrap_plots(plots_log, ncol = length(lags)) + 
-  plot_annotation(title = "正向因果效应强度随投资强度的响应 (Log Scale, 分滞后分析)")
 
-# 保存
-png("data_proc/analysis_breakpoint_raw_matrix.png", width = 5000, height = 3000, res = 300)
-print(p_thr_raw_grid)
-dev.off()
+# 遍历所有滞后阶数生成趋势图
+for (l in lags) {
+  cat(paste0("- 正在生成 Tp = ", l, " 的趋势图...\n"))
+  df_sub <- analysis_df %>% filter(tp == l)
+  if (nrow(df_sub) < 10) next
+  
+  p_trend <- plot_mean_trend_by_tp(df_sub, l)
+  
+  png(paste0("data_proc/causal_trend_tp", l, ".png"), width = 4500, height = 2000, res = 300)
+  print(p_trend)
+  dev.off()
+}
 
-png("data_proc/analysis_breakpoint_log_matrix.png", width = 5000, height = 3000, res = 300)
-print(p_thr_log_grid)
-dev.off()
 
-cat("\n所有深度分析已完成！请查看 data_proc/ 下的图片。\n")
