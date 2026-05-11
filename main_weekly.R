@@ -82,6 +82,51 @@ perfect_stations <- station_overall_stats %>%
   pull(meteo_stat_id)
 cat("\n完美站点前10名:", head(perfect_stations, 10), "...\n")
 
+# 选取前 20 个完美站点进行测试
+test_stations <- head(perfect_stations, 20)
+
+# 7. 周度热胁迫与 SIF 相关性分析 (20 站点散点图) ----
+cat("\n【周度热胁迫与 SIF 相关性分析 (20 站点)】\n")
+
+# 准备绘图数据：20 个测试站点的第 20-39 周数据
+plot_data_20 <- data_heat_sif_weekly %>%
+  filter(meteo_stat_id %in% test_stations, week %in% 20:39)
+
+# 7.1 线性尺度 (去趋势)
+p_corr_grid <- ggplot(plot_data_20, aes(x = heat_index_composite_detrended, y = sif_detrended)) +
+  geom_point(alpha = 0.4, size = 1, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "red", linetype = "dashed", linewidth = 0.8) +
+  facet_wrap(~ meteo_stat_id, scales = "free", ncol = 5) +
+  labs(title = "周度热胁迫与 SIF 相关性 (线性尺度)",
+       subtitle = "变量：去趋势后的残差 | 数据范围：第 20-39 周",
+       x = "热胁迫指数 (去趋势)", y = "SIF (去趋势)") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5))
+
+ggsave("data_proc/weekly_heat_sif_correlation_20_linear.png", p_corr_grid, width = 15, height = 12, dpi = 300)
+
+# 7.2 Log-Log 尺度 (原始物理量)
+# 注意：log 空间要求数据为正，这里使用 heat_over_sum 和 sif_interp，并微调 0 值
+plot_data_20_log <- plot_data_20 %>%
+  filter(sif_interp > 0) %>%
+  mutate(heat_val = heat_over_sum + 0.01) # 避开 0 以便取 log
+
+p_corr_log_grid <- ggplot(plot_data_20_log, aes(x = heat_val, y = sif_interp)) +
+  geom_point(alpha = 0.4, size = 1, color = "steelblue") +
+  geom_smooth(method = "lm", color = "darkorange", linetype = "dashed", linewidth = 0.8) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_wrap(~ meteo_stat_id, scales = "free", ncol = 5) +
+  labs(title = "周度热胁迫与 SIF 相关性 (Log-Log 尺度)",
+       subtitle = "变量：累积 VPD 强度 (x) vs 原始 SIF (y) | 双对数坐标",
+       x = "log10(累积 VPD 强度 + 0.01)", y = "log10(SIF)") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5))
+
+ggsave("data_proc/weekly_heat_sif_correlation_20_loglog.png", p_corr_log_grid, width = 15, height = 12, dpi = 300)
+
 # 8. 周度 CCM 因果分析 (针对 20 个高质量站点测试) ----
 cat("\n【周度 CCM 因果分析测试 (20 站点)】\n")
 
