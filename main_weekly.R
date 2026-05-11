@@ -158,7 +158,7 @@ perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
                    columns = "heat_index", target = "sif",
                    libSizes = paste(best_E+2, n_data-best_E, 10), 
                    sample = 50, random = TRUE, showPlot = FALSE)
-    
+    # Bug: 这一步处理有必要吗？
     ccm_summary <- ccm_res %>%
       group_by(LibSize) %>%
       summarise(rho_mean = mean(`heat_index:sif`, na.rm = TRUE), .groups = "drop")
@@ -167,8 +167,12 @@ perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
     trend <- cor(ccm_summary$LibSize, ccm_summary$rho_mean)
     
     # 3. S-map 确定因果性质
-    smap_res <- SMap(dataFrame = df_ccm, E = best_E, theta = 2,
-                     columns = "heat_index", target = "sif", embedded = FALSE)
+    smap_res <- SMap(dataFrame = df_ccm, 
+                     lib = paste("1", n_data),
+                     pred = paste("1", n_data),
+                     E = best_E, theta = 2,
+                     columns = "heat_index", target = "sif", 
+                     embedded = FALSE)
     
     coeffs <- smap_res$coefficients
     # 提取热胁迫系数 (通常在第2或第3列)
