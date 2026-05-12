@@ -182,11 +182,13 @@ perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
     mean_coef <- mean(coeffs[, coef_col], na.rm = TRUE)
     
     # 4. 判断逻辑
+    # Bug：这个判定标准是否合理？
     is_causal <- (final_rho > 0.1 & trend > 0)
     effect_type <- case_when(
       !is_causal ~ "无因果",
       mean_coef > 0 ~ "促进",
       mean_coef < 0 ~ "抑制",
+      # Bug: 其实是mean_coef = 0的部分。
       TRUE ~ "未知"
     )
     
@@ -203,9 +205,10 @@ perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
 }
 
 # 选取前 20 个完美站点进行测试
-test_stations <- head(perfect_stations, 20)
+# Bug：要不要测试？
+# test_stations <- head(perfect_stations, 20)
+test_stations <- perfect_stations
 
-cat("正在运行 CCM 分析 (Lags 0-2)... 这可能需要 1-2 分钟...\n")
 results_weekly <- map_dfr(c(0, 1, 2), function(l) {
   map_dfr(test_stations, ~perform_ccm_weekly(.x, data_heat_sif_weekly, tp_x = l))
 })
@@ -221,6 +224,10 @@ if (nrow(results_weekly) > 0) {
   
   ggsave("data_proc/weekly_ccm_test_results.png", p_res, width = 8, height = 6)
   
-  cat("\nCCM 测试完成。结果汇总：\n")
+  # 保存结果以便后续分析
+  saveRDS(results_weekly, "data_proc/results_weekly_test_20.rds")
+  
+  cat("\nCCM 测试完成。结果已保存至 data_proc/results_weekly_test_20.rds\n")
   print(results_weekly %>% group_by(tp, effect_type) %>% summarise(n = n(), .groups = "drop"))
 }
+
