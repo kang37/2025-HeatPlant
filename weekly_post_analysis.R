@@ -233,16 +233,43 @@ plot_breakpoint_weekly <- function(df_input, v_name, label) {
   return(p)
 }
 
-cat("- 正在计算各投资维度的断点...\n")
-p_thr_tot   <- plot_breakpoint_weekly(df_lag0_promote, "invest_pa_tot",   "单位总绿地投资 (Lag 0)")
-p_thr_built <- plot_breakpoint_weekly(df_lag0_promote, "invest_pa_built", "单位建成区投资 (Lag 0)")
-p_thr_park  <- plot_breakpoint_weekly(df_lag0_promote, "invest_pa_park",  "单位公园投资 (Lag 0)")
+# ============================================================================
+# 5. 断点回归：全滞后 x 全变量 投资阈值识别 (Log-Log) ----
+# ============================================================================
+cat("【5. 断点回归：全滞后 x 全变量 投资阈值识别 (Log-Log)】\n")
 
-# 组合三张图
-combined_thresholds <- (p_thr_tot / p_thr_built / p_thr_park) +
-  plot_annotation(title = "Lag 0 促进效应随投资强度的突变阈值分析",
-                  theme = theme(plot.title = element_text(size = BASE_FONT_SIZE*1.2, face="bold", hjust=0.5)))
+unique_lags <- sort(unique(results_weekly_var$tp))
+vars_inv <- c("invest_pa_tot", "invest_pa_built", "invest_pa_park")
+labs_inv <- c("单位总绿地投资", "单位建成区投资", "单位公园投资")
 
-ggsave("data_proc/weekly_post_threshold_lag0.png", combined_thresholds, width = 25, height = 40, dpi = 100)
+cat("- 正在生成断点回归分析矩阵...\n")
+all_breakpoint_plots <- list()
 
-cat("\n所有周度后续分析（包括断点回归）已完成！请查看 data_proc/ 下的图片。\n")
+for (l in unique_lags) {
+  cat(paste0("  - 正在处理 Lag ", l, "...\n"))
+  # 筛选当前滞后的促进作用数据
+  df_sub_lag <- results_weekly_var %>%
+    filter(tp == l, effect_type == "促进", abs_effect > 0)
+  
+  for (v_idx in seq_along(vars_inv)) {
+    v_name <- vars_inv[v_idx]
+    v_lab  <- labs_inv[v_idx]
+    
+    p <- plot_breakpoint_weekly(df_sub_lag, v_name, paste0(v_lab, " (Lag ", l, ")"))
+    all_breakpoint_plots[[length(all_breakpoint_plots) + 1]] <- p
+  }
+}
+
+# 组合全量矩阵图：行是 Lag，列是变量
+combined_threshold_matrix <- wrap_plots(all_breakpoint_plots, ncol = length(vars_inv)) +
+  plot_annotation(title = "全滞后周期下促进效应随投资强度的突变阈值分析矩阵",
+                  subtitle = "行：时间滞后 (周) | 列：投资指标类型",
+                  theme = theme(plot.title = element_text(size = BASE_FONT_SIZE*1.2, face="bold", hjust=0.5),
+                                plot.subtitle = element_text(size = BASE_FONT_SIZE*0.8, hjust = 0.5)))
+
+# 动态计算高度：每个 lag 约 12 英寸，宽度固定为 3 列共 35 英寸
+target_height_thr <- length(unique_lags) * 12
+ggsave("data_proc/weekly_post_threshold_matrix_all.png", combined_threshold_matrix, 
+       width = 35, height = target_height_thr, dpi = 100, limitsize = FALSE)
+
+cat("\n所有周度后续分析（包括全滞后断点回归矩阵）已完成！请查看 data_proc/ 下的图片。\n")
