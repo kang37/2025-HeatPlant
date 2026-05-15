@@ -209,7 +209,8 @@ perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
 # test_stations <- head(perfect_stations, 20)
 test_stations <- perfect_stations
 
-results_weekly <- map_dfr(c(0, 1, 2), function(l) {
+# Bug：总共需要跑14个小时
+results_weekly <- map_dfr(c(0, 1, 2, 3, 4, 5), function(l) {
   map_dfr(test_stations, ~perform_ccm_weekly(.x, data_heat_sif_weekly, tp_x = l))
 })
 
