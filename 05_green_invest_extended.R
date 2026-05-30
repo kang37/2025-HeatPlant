@@ -248,4 +248,63 @@ if (nrow(inhibit_data) > 30) {
   dev.off()
 }
 
-cat("\n分析完成！逻辑已还原，阈值图字体已放大。\n")
+# ============================================================================
+# 9. 分省份滞后分析可视化 (新)
+# ============================================================================
+
+cat("\n【9. 分省份滞后分析可视化】\n")
+
+# 1. 加载滞后分析结果
+lag_res_path <- "data_proc/extended_lag_ccm_results.rds"
+if (file.exists(lag_res_path)) {
+  lag_data <- readRDS(lag_res_path) %>%
+    mutate(meteo_stat_id = as.character(meteo_stat_id))
+  
+  # 2. 获取省份信息 (通过重新进行空间匹配以确保获得 pr_name)
+  china_cities_full <- st_read("data_raw/china_cities/city.shp", quiet = TRUE) %>% 
+    st_transform(crs = 4326) %>%
+    dplyr::select(city_name = ct_name, province_name = pr_name) %>%
+    as.data.frame() %>% dplyr::select(-geometry) %>% distinct()
+
+  stations_prov <- stations_with_city %>%
+    left_join(china_cities_full, by = "city_name") %>%
+    filter(!is.na(province_name))
+
+  # 合并数据
+  plot_lag_data <- lag_data %>%
+    inner_join(stations_prov, by = "meteo_stat_id") %>%
+    mutate(lag = as.numeric(lag))
+
+  # 3. 绘图：分省份展示
+  # 我们只选择站点数较多（如 > 5个站点）的省份进行展示，或者全展示但分多图
+  provinces <- unique(plot_lag_data$province_name)
+  
+  # 定义绘图函数
+  p_prov_lags <- ggplot(plot_lag_data, aes(x = lag, y = rho, group = meteo_stat_id)) +
+    geom_line(alpha = 0.3, color = "gray40") +
+    geom_point(aes(shape = is_sig, fill = is_sig), size = 3, stroke = 1) +
+    scale_shape_manual(values = c("TRUE" = 21, "FALSE" = 21)) + # 统一用圆圈
+    scale_fill_manual(values = c("TRUE" = "black", "FALSE" = "white")) + # 实心/空心
+    facet_wrap(~province_name, scales = "free_y", ncol = 4) +
+    labs(
+      title = "各省份站点因果强度随时间滞后(Lag)的变化趋势",
+      subtitle = "实心点: 显著 (Rho > 0.1 & Trend > 0); 空心点: 不显著",
+      x = "滞后时间 (Months)",
+      y = "因果强度 (CCM Rho)",
+      fill = "是否显著", shape = "是否显著"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+      strip.text = element_text(face = "bold", size = 12),
+      legend.position = "bottom"
+    )
+
+  ggsave("data_proc/province_lag_analysis.png", p_prov_lags, width = 16, height = 20, dpi = 300)
+  cat("分省滞后分析图已保存: data_proc/province_lag_analysis.png\n")
+
+} else {
+  cat("警告: 找不到 extended_lag_ccm_results.rds，请先运行 08_run_extended_lag_ccm.R\n")
+}
+
+cat("\n所有扩展分析已完成!\n")
