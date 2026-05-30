@@ -210,9 +210,11 @@ perform_ccm_weekly <- function(station_id, data, tp_x = 0) {
 test_stations <- perfect_stations
 
 # Bug：总共需要跑14个小时
-results_weekly <- map_dfr(c(0, 1, 2, 3, 4, 5), function(l) {
-  map_dfr(test_stations, ~perform_ccm_weekly(.x, data_heat_sif_weekly, tp_x = l))
-})
+# results_weekly <- map_dfr(c(0, 1, 2, 3, 4, 5), function(l) {
+#   map_dfr(test_stations, ~perform_ccm_weekly(.x, data_heat_sif_weekly, tp_x = l))
+# })
+# Bug: 先通过文件直接读取。
+results_weekly <- readRDS("data_proc/results_weekly_0_5.rds")
 
 # 7. 可视化测试结果
 if (nrow(results_weekly) > 0) {
