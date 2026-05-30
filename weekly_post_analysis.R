@@ -272,4 +272,66 @@ target_height_thr <- length(unique_lags) * 12
 ggsave("data_proc/weekly_post_threshold_matrix_all.png", combined_threshold_matrix, 
        width = 35, height = target_height_thr, dpi = 100, limitsize = FALSE)
 
-cat("\n所有周度后续分析（包括全滞后断点回归矩阵）已完成！请查看 data_proc/ 下的图片。\n")
+# ============================================================================
+# 6. 站点因果性质随滞后阶数流变热图 (排序版) ----
+# ============================================================================
+cat("【6. 站点因果性质演变热图 (排序版)】\n")
+
+# 提取并计算各站点的序列特征进行智能排序
+station_seqs <- results_weekly_var %>%
+  arrange(meteo_stat_id, tp) %>%
+  group_by(meteo_stat_id) %>%
+  summarise(
+    seq_str = paste(effect_type, collapse = ","),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    seq_vec = list(strsplit(seq_str, ",")[[1]]),
+    rle_res = list(rle(seq_vec)),
+    n_runs = length(rle_res$values),
+    
+    # 定义分类组别
+    group = case_when(
+      all(seq_vec == "促进") ~ 1, # 1. 全部促进
+      n_runs == 2 & rle_res$values[1] == "促进" & rle_res$values[2] == "抑制" ~ 2, # 2. 促转抑
+      n_runs == 2 & rle_res$values[1] == "抑制" & rle_res$values[2] == "促进" ~ 3, # 3. 抑转促
+      all(seq_vec == "抑制") ~ 4, # 4. 全部抑制
+      TRUE ~ 5 # 5. 其他复杂或无因果情况
+    ),
+    
+    # 提取发生转变发生前的长度 (用于在同组内排序：转变得越晚，排得越靠前)
+    switch_len = ifelse(group %in% c(2, 3), rle_res$lengths[1], 0)
+  ) %>%
+  ungroup() %>%
+  # 排序逻辑：按组别升序，组内按转变节点降序，最后按站点号
+  arrange(group, desc(switch_len), meteo_stat_id)
+
+# 获取排序后的站点因子水平
+ordered_stations <- station_seqs$meteo_stat_id
+
+# 准备绘图数据，应用反向因子（因为 ggplot y 轴默认从下往上画）
+plot_tile_data <- results_weekly_var %>%
+  mutate(meteo_stat_id = factor(meteo_stat_id, levels = rev(ordered_stations)))
+
+# 绘制热图
+p_tile <- ggplot(plot_tile_data, aes(x = factor(tp), y = meteo_stat_id, fill = effect_type)) +
+  geom_tile(color = "white", linewidth = 1) +
+  scale_fill_manual(values = c("促进"="#E41A1C", "抑制"="#377EB8", "无因果"="#999999", "未知"="#FF7F00", "S-map失败"="#FF7F00")) +
+  labs(title = "中国城市周度热事件因果性质演变矩阵 (20 站点测试)",
+       subtitle = "排序规则: 全促进 -> 促转抑(晚转到早转) -> 抑转促 -> 全抑制 -> 其他",
+       x = "时间滞后 (周 Tp)", y = "站点编号", fill = "因果性质") +
+  theme_minimal(base_size = BASE_FONT_SIZE) +
+  theme(
+    plot.title = element_text(face="bold", hjust=0.5),
+    plot.subtitle = element_text(hjust=0.5),
+    axis.text.y = element_text(size = BASE_FONT_SIZE * 0.6, face = "bold"),
+    axis.text.x = element_text(size = BASE_FONT_SIZE * 0.8, face = "bold"),
+    legend.position = "bottom"
+  )
+
+# 根据站点数量动态调整高度，限制最大高度以防崩溃
+target_height_tile <- min(max(15, length(ordered_stations) * 0.3), 100)
+ggsave("data_proc/weekly_post_causal_tile_ordered.png", p_tile, width = 30, height = target_height_tile, dpi = 100, limitsize = FALSE)
+
+cat("\n所有周度后续分析（包括全滞后断点回归矩阵和演变热图）已完成！请查看 data_proc/ 下的图片。\n")
