@@ -594,3 +594,231 @@ cat(sprintf("【方差分解】\n  投资独立贡献 = %.2f%%\n  地理独立�
 cat("\n输出目录:", OUT, "\n")
 cat("文件列表:\n")
 cat(paste(" -", list.files(OUT)), sep = "\n")
+
+
+# J. 分层方差分解 1：按响应类型分层
+# -----------------------------------------------------------------------------
+# 按站点类型分层；各层因变量不同（因为 always_* 组内TRRI无方差）：
+#   inhibit_promote  → ITW（转折时间，越小越快恢复）
+#   promote_inhibit  → HTW（促进持续时间，越大越好）
+#   always_inhibit   → tp=0 时 mean_coef 的绝对值（抑制强度）
+#   always_promote   → tp=0 时 mean_coef（促进强度）
+# 投资组：pa_built_10y；地理组：longitude + latitude + Köppen哑变量
+
+stype_levels <- c("always_promote", "promote_inhibit",
+                  "inhibit_promote", "always_inhibit")
+stype_labels <- c("全程促进", "促进→抑制", "抑制→促进", "全程抑制")
+
+# 各类型对应的因变量名称和含义
+stype_outcome <- list(
+  inhibit_promote  = list(var = "ITW",       label = "ITW（转折周数，小=恢复快）"),
+  promote_inhibit  = list(var = "HTW",       label = "HTW（促进周数，大=持续长）"),
+  always_inhibit   = list(var = "inhibit_strength", label = "抑制强度（|coef@tp0|）"),
+  always_promote   = list(var = "promote_strength", label = "促进强度（coef@tp0）")
+)
+
+# 补充额外因变量到 anal_df
+tp0_coef <- ccm_results %>%
+  filter(tp == 0) %>%
+  dplyr::select(meteo_stat_id, coef_tp0 = mean_coef)
+
+anal_df2 <- anal_df %>%
+  left_join(tp0_coef, by = "meteo_stat_id") %>%
+  mutate(
+    inhibit_strength = -coef_tp0,   # 正值=抑制越强
+    promote_strength =  coef_tp0
+  )
+
+run_vp2 <- function(df, outcome_var, label) {
+  d <- df %>%
+    filter(!is.na(.data[[outcome_var]]),
+           !is.na(pa_built_10y), !is.na(longitude), !is.na(latitude),
+           pa_built_10y > 0) %>%
+    droplevels()
+  if (nrow(d) < 15) {
+    cat(sprintf("    [跳过] n=%d < 15\n", nrow(d)))
+    return(NULL)
+  }
+  # 地理组：经纬度 + Köppen哑变量（若组内有多个气候区）
+  kopp_cols <- c("koppen_B","koppen_C","koppen_D")
+  kopp_use  <- kopp_cols[sapply(kopp_cols, function(v) var(d[[v]], na.rm=TRUE) > 0)]
+  geo_df    <- dplyr::select(d, longitude, latitude, all_of(kopp_use))
+
+  vp <- tryCatch(
+    vegan::varpart(d[[outcome_var]],
+                   dplyr::select(d, pa_built_10y),
+                   geo_df),
+    error = function(e) { cat("    varpart error:", e$message, "\n"); NULL }
+  )
+  if (is.null(vp)) return(NULL)
+  fr <- vp$part$indfract
+  tibble(
+    outcome     = outcome_var,
+    label       = label,
+    n           = nrow(d),
+    invest_R2   = round(fr$Adj.R.square[1] * 100, 2),
+    geo_R2      = round(fr$Adj.R.square[2] * 100, 2),
+    shared_R2   = round(fr$Adj.R.square[3] * 100, 2),
+    unexplained = round(fr$Adj.R.square[4] * 100, 2)
+  )
+}
+
+cat("\n=== J. 按响应类型分层的方差分解 ===\n")
+vp_stype <- map_dfr(names(stype_outcome), function(st) {
+  info <- stype_outcome[[st]]
+  df_s <- anal_df2 %>% filter(stype == st)
+  cat(sprintf("\n[%s] n=%d, 因变量=%s\n",
+              st, nrow(df_s), info$label))
+  res <- run_vp2(df_s, info$var, info$label)
+  if (!is.null(res)) mutate(res, stype = st)
+})
+
+if (nrow(vp_stype) > 0) {
+  vp_stype <- vp_stype %>%
+    mutate(stype_label = factor(stype, levels = stype_levels, labels = stype_labels))
+  write_csv(vp_stype, file.path(OUT, "varpart_by_stype.csv"))
+  cat("\n"); print(vp_stype %>% dplyr::select(stype, label, n, invest_R2, geo_R2, shared_R2))
+
+  # 图：分层方差分解气泡图（响应类型）
+  p_vp_stype <- vp_stype %>%
+    pivot_longer(c(invest_R2, geo_R2, shared_R2),
+                 names_to = "comp", values_to = "r2") %>%
+    mutate(
+      r2_show    = pmax(r2, 0),
+      comp_label = factor(comp,
+                          levels = c("invest_R2", "shared_R2", "geo_R2"),
+                          labels = c("投资", "共享", "地理")),
+      fill_col   = case_when(comp == "invest_R2" ~ "#D73027",
+                             comp == "shared_R2" ~ "#FDAE61",
+                             comp == "geo_R2"    ~ "#4575B4")
+    ) %>%
+    ggplot(aes(x = comp_label, y = stype_label)) +
+    geom_point(aes(size = r2_show, color = comp), alpha = 0.85) +
+    geom_text(aes(label = sprintf("%.1f%%", r2_show)),
+              size = 4, vjust = -1.5, family = "heiti") +
+    scale_size_continuous(range = c(2, 14), name = "独立解释力(%)") +
+    scale_color_manual(
+      values = c(invest_R2 = "#D73027", shared_R2 = "#FDAE61", geo_R2 = "#4575B4"),
+      guide  = "none") +
+    labs(
+      title    = "分层方差分解：响应类型分层",
+      subtitle = "投资=pa_built_10y；地理=经纬度+Köppen哑变量\n因变量：ITW / HTW / 抑制强度 / 促进强度",
+      x = "方差来源", y = "响应类型"
+    ) +
+    theme_cn() +
+    theme(panel.grid.major = element_line(color = "grey92"))
+
+  ggsave(file.path(OUT, "varpart_by_stype.png"),
+         p_vp_stype, width = 9, height = 7, dpi = 300)
+  cat("-> varpart_by_stype.png\n")
+}
+
+
+# K. 分层方差分解 2：按气候区分层
+# -----------------------------------------------------------------------------
+# 因变量：TRRI；投资组：pa_built_10y；地理组：longitude + latitude（仅经纬度）
+
+cat("\n=== K. 按气候区分层的方差分解 ===\n")
+
+run_vp_geo <- function(df, grp_label) {
+  d <- df %>%
+    filter(!is.na(TRRI), !is.na(pa_built_10y),
+           !is.na(longitude), !is.na(latitude),
+           pa_built_10y > 0)
+  if (nrow(d) < 15) {
+    cat(sprintf("    [%s 跳过] n=%d < 15\n", grp_label, nrow(d)))
+    return(NULL)
+  }
+  vp <- tryCatch(
+    vegan::varpart(d$TRRI,
+                   dplyr::select(d, pa_built_10y),
+                   dplyr::select(d, longitude, latitude)),
+    error = function(e) { cat("    varpart error:", e$message, "\n"); NULL }
+  )
+  if (is.null(vp)) return(NULL)
+  fr <- vp$part$indfract
+  tibble(
+    koppen_group = grp_label,
+    n            = nrow(d),
+    invest_R2    = round(fr$Adj.R.square[1] * 100, 2),
+    geo_R2       = round(fr$Adj.R.square[2] * 100, 2),
+    shared_R2    = round(fr$Adj.R.square[3] * 100, 2),
+    unexplained  = round(fr$Adj.R.square[4] * 100, 2)
+  )
+}
+
+koppen_groups <- sort(unique(anal_df$koppen_group))
+vp_koppen <- map_dfr(koppen_groups, function(g) {
+  df_g <- filter(anal_df, koppen_group == g)
+  cat(sprintf("\n[%s] n=%d\n", g, nrow(df_g)))
+  run_vp_geo(df_g, g)
+})
+
+# 补上全样本行
+vp_all_latlon <- run_vp_geo(anal_df, "ALL")
+vp_koppen_full <- bind_rows(
+  if (!is.null(vp_all_latlon)) mutate(vp_all_latlon, koppen_group = "ALL"),
+  vp_koppen
+)
+
+write_csv(vp_koppen_full, file.path(OUT, "varpart_by_koppen.csv"))
+cat("\n"); print(vp_koppen_full)
+
+if (nrow(vp_koppen_full) == 0) {
+  cat("警告：所有气候区 varpart 均失败，跳过绘图。\n")
+} else {
+
+# 图：分层方差分解条形图（气候区）
+koppen_order <- intersect(c("ALL","A","B","C","D"), vp_koppen_full$koppen_group)
+koppen_name  <- c(ALL="全部", A="A(热带)", B="B(干旱)",
+                  C="C(温带)", D="D(大陆)")
+
+p_vp_koppen <- vp_koppen_full %>%
+  pivot_longer(c(invest_R2, geo_R2, shared_R2),
+               names_to = "comp", values_to = "r2") %>%
+  mutate(
+    r2_show    = pmax(r2, 0),
+    comp_label = factor(comp,
+                        levels = c("invest_R2", "shared_R2", "geo_R2"),
+                        labels = c("投资", "共享", "地理")),
+    grp_label  = factor(
+      dplyr::recode(koppen_group, !!!koppen_name),
+      levels = koppen_name[koppen_order]
+    )
+  ) %>%
+  filter(!is.na(grp_label)) %>%
+  ggplot(aes(x = comp_label, y = r2_show, fill = comp_label)) +
+  geom_col(width = 0.55, alpha = 0.85, position = "dodge") +
+  geom_text(aes(label = sprintf("%.1f%%", r2_show)),
+            vjust = -0.4, size = 3.8, family = "heiti") +
+  scale_fill_manual(
+    values = c("投资" = "#D73027", "共享" = "#FDAE61", "地理" = "#4575B4"),
+    name = "方差来源") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+  facet_wrap(~grp_label, nrow = 1) +
+  labs(
+    title    = "分层方差分解：气候区分层",
+    subtitle = "因变量=TRRI；投资=pa_built_10y；地理=经纬度（不含气候区哑变量）",
+    x = NULL, y = "调整R²（%）"
+  ) +
+  theme_cn() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 20, hjust = 1))
+
+ggsave(file.path(OUT, "varpart_by_koppen.png"),
+       p_vp_koppen, width = 12, height = 6, dpi = 300)
+cat("-> varpart_by_koppen.png\n")
+
+} # end if nrow(vp_koppen_full) > 0
+
+
+# 终端汇总补充
+cat("\n=== J+K 分层解释力汇总 ===\n")
+cat("\n[响应类型分层]\n")
+if (exists("vp_stype") && nrow(vp_stype) > 0)
+  print(vp_stype %>% dplyr::select(stype, n, invest_R2, geo_R2, shared_R2))
+cat("\n[气候区分层]\n")
+print(vp_koppen_full)
+
+cat("\n全部输出文件:\n")
+cat(paste(" -", list.files(OUT)), sep = "\n")
