@@ -22,8 +22,8 @@ pacman::p_load(dplyr, tidyr, purrr, ggplot2, stringr, readr,
                targets, rEDM, strucchange)
 
 setwd("/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant")
-OUT     <- "data_proc/output_04"
-CCM_RDS <- "data_proc/output_04/ccm_04_results.rds"
+OUT     <- "data_proc/output_10y_built_up_04"
+CCM_RDS <- "data_proc/output_10y_built_up_04/ccm_04_results.rds"
 dir.create(OUT, recursive = TRUE, showWarnings = FALSE)
 
 font_add("heiti", "/System/Library/Fonts/STHeiti Medium.ttc")
@@ -819,6 +819,268 @@ if (exists("vp_stype") && nrow(vp_stype) > 0)
   print(vp_stype %>% dplyr::select(stype, n, invest_R2, geo_R2, shared_R2))
 cat("\n[气候区分层]\n")
 print(vp_koppen_full)
+
+cat("\n全部输出文件:\n")
+cat(paste(" -", list.files(OUT)), sep = "\n")
+
+
+# L. 城市级聚合 + 方差分解（消除空间伪重复）
+# -----------------------------------------------------------------------------
+# 每城市取 TRRI 均值，投资变量已是城市级，地理取站点均值
+
+cat("\n=== L. 城市级聚合方差分解 ===\n")
+
+# 城市级汇总（city_name 已在 anal_df 中，来自 E 段投资连接）
+city_agg <- anal_df %>%
+  group_by(city_name) %>%
+  summarise(
+    n_stations   = n(),
+    TRRI_mean    = mean(TRRI,        na.rm = TRUE),
+    TRRI_sd      = sd(TRRI,          na.rm = TRUE),
+    TRRI_range   = max(TRRI) - min(TRRI),
+    pa_built_10y = first(pa_built_10y),
+    longitude    = mean(longitude,   na.rm = TRUE),
+    latitude     = mean(latitude,    na.rm = TRUE),
+    koppen_group = first(koppen_group),
+    koppen_B     = first(koppen_B),
+    koppen_C     = first(koppen_C),
+    koppen_D     = first(koppen_D),
+    .groups      = "drop"
+  ) %>%
+  filter(!is.na(TRRI_mean), !is.na(pa_built_10y),
+         !is.na(longitude), !is.na(latitude))
+
+cat(sprintf("城市数: %d（站点数中位数: %.0f）\n",
+            nrow(city_agg), median(city_agg$n_stations)))
+cat("每城市站点数分布:\n")
+print(table(city_agg$n_stations))
+
+# 城市级方差分解：投资 vs 地理（经纬度 + Köppen哑变量）
+geo_vars_city <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
+
+vp_city <- vegan::varpart(
+  city_agg$TRRI_mean,
+  dplyr::select(city_agg, pa_built_10y),
+  dplyr::select(city_agg, all_of(geo_vars_city))
+)
+
+cat("\n--- 城市级方差分解（投资 vs 地理）---\n")
+print(vp_city)
+
+fr_city  <- vp_city$part$indfract
+vp_city_tbl <- tibble(
+  level      = "城市级（聚合）",
+  component  = c("投资（独立）", "地理（独立）", "共享部分", "未解释"),
+  adj_R2_pct = round(fr_city$Adj.R.square * 100, 2)
+)
+print(vp_city_tbl)
+
+# 与站点级对比
+compare_tbl <- bind_rows(
+  tibble(level="站点级（原始）",
+         invest_R2 = fr$Adj.R.square[1]*100,
+         geo_R2    = fr$Adj.R.square[2]*100,
+         shared_R2 = fr$Adj.R.square[3]*100,
+         n         = nrow(anal_df)),
+  tibble(level="城市级（聚合）",
+         invest_R2 = fr_city$Adj.R.square[1]*100,
+         geo_R2    = fr_city$Adj.R.square[2]*100,
+         shared_R2 = fr_city$Adj.R.square[3]*100,
+         n         = nrow(city_agg))
+) %>% mutate(across(c(invest_R2,geo_R2,shared_R2), ~round(.x,2)))
+
+cat("\n--- 站点级 vs 城市级对比 ---\n")
+print(compare_tbl)
+write_csv(compare_tbl, file.path(OUT, "varpart_city_vs_station.csv"))
+
+# 同样按气候区分层（城市级）
+cat("\n--- 城市级 × 气候区分层 ---\n")
+vp_city_koppen <- map_dfr(c("B","C","D"), function(g) {
+  d <- filter(city_agg, koppen_group == g)
+  cat(sprintf("  [%s] n=%d 城市\n", g, nrow(d)))
+  if (nrow(d) < 15) return(NULL)
+  vp <- tryCatch(
+    vegan::varpart(d$TRRI_mean,
+                   dplyr::select(d, pa_built_10y),
+                   dplyr::select(d, longitude, latitude)),
+    error = function(e) NULL)
+  if (is.null(vp)) return(NULL)
+  fr2 <- vp$part$indfract
+  tibble(koppen=g, n=nrow(d),
+         invest_R2 = round(fr2$Adj.R.square[1]*100,2),
+         geo_R2    = round(fr2$Adj.R.square[2]*100,2),
+         shared_R2 = round(fr2$Adj.R.square[3]*100,2))
+})
+print(vp_city_koppen)
+write_csv(vp_city_koppen, file.path(OUT, "varpart_city_koppen.csv"))
+
+# 城市级方差分解条形图（站点级 vs 城市级）
+p_compare <- compare_tbl %>%
+  pivot_longer(c(invest_R2, geo_R2, shared_R2),
+               names_to = "comp", values_to = "r2") %>%
+  mutate(
+    r2_show    = pmax(r2, 0),
+    comp_label = factor(comp,
+                        levels = c("invest_R2","shared_R2","geo_R2"),
+                        labels = c("投资","共享","地理")),
+    level      = factor(level, levels = c("站点级（原始）","城市级（聚合）"))
+  ) %>%
+  ggplot(aes(x = comp_label, y = r2_show, fill = comp_label)) +
+  geom_col(width = 0.5, alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.2f%%", r2_show)),
+            vjust = -0.4, size = 5, family = "heiti") +
+  scale_fill_manual(
+    values = c("投资"="#D73027","共享"="#FDAE61","地理"="#4575B4"),
+    guide  = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+  facet_wrap(~level) +
+  labs(title    = "方差分解：站点级 vs 城市级聚合",
+       subtitle = "消除城市内伪重复后投资解释力的变化",
+       x = NULL, y = "调整R²（%）") +
+  theme_cn()
+
+ggsave(file.path(OUT, "varpart_city_compare.png"),
+       p_compare, width = 10, height = 6, dpi = 300)
+cat("-> varpart_city_compare.png\n")
+
+
+# M. 城市内部站点异质性可视化（分面板输出）
+# -----------------------------------------------------------------------------
+# 每城市：各站点的响应类型（stype）堆叠条形图
+# 城市按气候区+站点数排序，每面板约50个城市
+
+cat("\n=== M. 城市内部站点异质性可视化 ===\n")
+
+# 准备数据：站点级 stype，附城市信息
+stype_colors <- c(
+  "always_inhibit"  = "#4575B4",
+  "inhibit_promote" = "#74ADD1",
+  "promote_inhibit" = "#FDAE61",
+  "always_promote"  = "#D73027"
+)
+stype_labels_map <- c(
+  always_inhibit  = "全程抑制",
+  inhibit_promote = "抑制→促进",
+  promote_inhibit = "促进→抑制",
+  always_promote  = "全程促进"
+)
+
+city_stype <- anal_df %>%
+  dplyr::select(city_name, stype, koppen_group) %>%
+  mutate(stype_label = factor(stype_labels_map[stype],
+                              levels = stype_labels_map))
+
+# 城市排序：先按气候区，再按主导类型，再按站点数
+city_order <- city_stype %>%
+  group_by(city_name) %>%
+  summarise(
+    n_total     = n(),
+    n_types     = n_distinct(stype),        # 城市内类型数（多样性）
+    dominant    = names(sort(table(stype), decreasing=TRUE))[1],
+    koppen_group = first(koppen_group),
+    .groups     = "drop"
+  ) %>%
+  arrange(koppen_group, dominant, desc(n_total)) %>%
+  mutate(city_rank = row_number())
+
+# 划分面板（每面板 N_PER 个城市）
+N_PER  <- 50
+n_city <- nrow(city_order)
+n_panel <- ceiling(n_city / N_PER)
+
+city_order <- city_order %>%
+  mutate(panel = ceiling(city_rank / N_PER))
+
+cat(sprintf("城市总数: %d，分 %d 个面板（每面板≤%d城市）\n",
+            n_city, n_panel, N_PER))
+
+# 各面板分别绘图
+walk(1:n_panel, function(pid) {
+  cities_p <- city_order %>% filter(panel == pid) %>%
+    arrange(city_rank)
+  city_levels <- cities_p$city_name
+
+  df_p <- city_stype %>%
+    filter(city_name %in% city_levels) %>%
+    group_by(city_name, stype_label) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(city_name) %>%
+    mutate(pct = n / sum(n) * 100,
+           n_total = sum(n)) %>%
+    ungroup() %>%
+    left_join(dplyr::select(city_order, city_name, koppen_group, n_types),
+              by = "city_name") %>%
+    mutate(
+      city_name = factor(city_name, levels = city_levels),
+      # 城市标签：加星号表示内部有多种类型
+      city_label = ifelse(n_types > 1,
+                          paste0(as.character(city_name), " *"),
+                          as.character(city_name))
+    )
+
+  # 重建 city_label 的 factor 顺序
+  label_order <- df_p %>%
+    distinct(city_name, city_label) %>%
+    arrange(match(city_name, city_levels)) %>%
+    pull(city_label)
+  df_p <- df_p %>%
+    mutate(city_label = factor(city_label, levels = label_order))
+
+  # 气候区分隔线位置
+  koppen_breaks <- cities_p %>%
+    group_by(koppen_group) %>%
+    summarise(first_rank = min(city_rank), .groups="drop") %>%
+    mutate(x_pos = match(
+      cities_p$city_name[cities_p$city_rank == first_rank],
+      city_levels
+    ) - 0.5) %>%
+    filter(x_pos > 0.5)
+
+  p <- ggplot(df_p, aes(x = city_label, y = pct, fill = stype_label)) +
+    geom_col(width = 0.8, alpha = 0.9) +
+    geom_vline(xintercept = koppen_breaks$x_pos,
+               color = "grey30", linewidth = 0.7, linetype = "dashed") +
+    scale_fill_manual(values = setNames(stype_colors, stype_labels_map),
+                      name = "响应类型") +
+    scale_y_continuous(labels = function(x) paste0(x, "%"),
+                       expand = expansion(mult = c(0, 0.05))) +
+    labs(
+      title    = sprintf("城市内部站点热响应类型分布（面板 %d/%d）",
+                         pid, n_panel),
+      subtitle = "* = 城市内存在多种类型；虚线 = 气候区边界；各城市站点数标注于顶部",
+      x = NULL, y = "站点比例"
+    ) +
+    # 顶部标注站点总数
+    geom_text(data = df_p %>% distinct(city_label, n_total),
+              aes(x = city_label, y = 102, label = n_total, fill = NULL),
+              size = 2.8, family = "heiti", color = "grey30") +
+    theme_cn(bs = 11) +
+    theme(
+      axis.text.x    = element_text(angle = 55, hjust = 1, size = 7.5),
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank()
+    )
+
+  fname <- sprintf("city_stype_panel%02d.png", pid)
+  ggsave(file.path(OUT, fname), p, width = 16, height = 7, dpi = 300)
+  cat(sprintf("-> %s\n", fname))
+})
+
+# 汇总：各城市异质性统计
+city_diversity <- city_order %>%
+  left_join(
+    city_stype %>% group_by(city_name, stype) %>% summarise(n=n(),.groups="drop") %>%
+      pivot_wider(names_from=stype, values_from=n, values_fill=0),
+    by = "city_name"
+  )
+write_csv(city_diversity, file.path(OUT, "city_stype_diversity.csv"))
+cat("-> city_stype_diversity.csv\n")
+
+cat(sprintf("\n城市内类型数分布（n_types=1为同质，>1为异质）:\n"))
+print(table(city_order$n_types))
+cat(sprintf("异质城市（>1种类型）: %d / %d (%.1f%%)\n",
+            sum(city_order$n_types > 1), nrow(city_order),
+            mean(city_order$n_types > 1)*100))
 
 cat("\n全部输出文件:\n")
 cat(paste(" -", list.files(OUT)), sep = "\n")
