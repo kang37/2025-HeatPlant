@@ -1084,3 +1084,23 @@ cat(sprintf("异质城市（>1种类型）: %d / %d (%.1f%%)\n",
 
 cat("\n全部输出文件:\n")
 cat(paste(" -", list.files(OUT)), sep = "\n")
+
+# 城市级 × 气候区分层方差分解（地理仅含经纬度）
+vp_city_koppen <- map_dfr(c("B","C","D"), function(g) {
+  d <- filter(city_agg, koppen_group == g)
+  cat(sprintf("[%s] n=%d 城市\n", g, nrow(d)))
+  if (nrow(d) < 15) return(NULL)
+  vp <- tryCatch(
+    vegan::varpart(d$TRRI_mean,
+                   dplyr::select(d, pa_built_10y),
+                   dplyr::select(d, longitude, latitude)),
+    error = function(e) NULL)
+  if (is.null(vp)) return(NULL)
+  fr2 <- vp$part$indfract
+  tibble(koppen = g, n = nrow(d),
+         invest_R2 = round(fr2$Adj.R.square[1]*100, 2),
+         geo_R2    = round(fr2$Adj.R.square[2]*100, 2),
+         shared_R2 = round(fr2$Adj.R.square[3]*100, 2))
+})
+print(vp_city_koppen)
+write_csv(vp_city_koppen, file.path(OUT, "varpart_city_koppen.csv"))
