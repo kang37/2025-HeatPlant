@@ -406,7 +406,35 @@ invest_tbl <- bind_cols(
     pa_built_latest = inv_latest / area_built
   )
 
-city_vars <- invest_tbl
+# --- E3: 控制变量（人均GDP、城镇化率，2011-2020均值）---
+# 来源：中国城市数据库1990-2023.xlsx（长格式，每城市每年一行）
+city_db_raw <- readxl::read_excel(
+  "data_raw/中国城市数据库1990-2023.xlsx",
+  sheet = "原始数据", col_names = TRUE
+) %>%
+  rename(year = 1, city_name = 3,
+         pgdp        = `人均地区生产总值(元)`,
+         urban_rate  = `常住人口城镇化率(%)`) %>%
+  dplyr::select(year, city_name, pgdp, urban_rate) %>%
+  filter(year >= 2011, year <= 2020) %>%
+  mutate(across(c(pgdp, urban_rate), as.numeric))
+
+city_ctrl <- city_db_raw %>%
+  group_by(city_name) %>%
+  summarise(
+    pgdp_10y       = mean(pgdp,       na.rm = TRUE),
+    urban_rate_10y = mean(urban_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+n_ctrl <- sum(!is.na(city_ctrl$pgdp_10y))
+cat(sprintf("\n城市数据库：匹配城市 %d，人均GDP有效 %d，城镇化率有效 %d\n",
+            nrow(city_ctrl),
+            sum(!is.na(city_ctrl$pgdp_10y)),
+            sum(!is.na(city_ctrl$urban_rate_10y))))
+
+city_vars <- invest_tbl %>%
+  left_join(city_ctrl, by = "city_name")
 
 invest_station <- station_city_map %>%
   left_join(city_vars, by = "city_name")
@@ -414,6 +442,8 @@ invest_station <- station_city_map %>%
 cat(sprintf("\npa_built_10y    非NA站点: %d\n", sum(!is.na(invest_station$pa_built_10y))))
 cat(sprintf("pa_built_5y     非NA站点: %d\n", sum(!is.na(invest_station$pa_built_5y))))
 cat(sprintf("pa_built_latest 非NA站点: %d\n", sum(!is.na(invest_station$pa_built_latest))))
+cat(sprintf("pgdp_10y        非NA站点: %d\n", sum(!is.na(invest_station$pgdp_10y))))
+cat(sprintf("urban_rate_10y  非NA站点: %d\n", sum(!is.na(invest_station$urban_rate_10y))))
 
 
 # F. 合并分析数据框
@@ -434,19 +464,26 @@ anal_df <- trri_df %>%
     koppen_D           = as.integer(koppen_group == "D"),
     pa_built_10y_w     = winsorize(pa_built_10y),
     pa_built_5y_w      = winsorize(pa_built_5y),
-    pa_built_latest_w  = winsorize(pa_built_latest)
+    pa_built_latest_w  = winsorize(pa_built_latest),
+    pgdp_10y_w         = winsorize(pgdp_10y),
+    urban_rate_10y_w   = winsorize(urban_rate_10y)
   )
 
 cat(sprintf("\n站点总数（TRRI有效）: %d\n", nrow(anal_df)))
 cat(sprintf("pa_built_10y    非NA: %d\n", sum(!is.na(anal_df$pa_built_10y))))
 cat(sprintf("pa_built_5y     非NA: %d\n", sum(!is.na(anal_df$pa_built_5y))))
 cat(sprintf("pa_built_latest 非NA: %d\n", sum(!is.na(anal_df$pa_built_latest))))
+cat(sprintf("pgdp_10y        非NA: %d\n", sum(!is.na(anal_df$pgdp_10y))))
+cat(sprintf("urban_rate_10y  非NA: %d\n", sum(!is.na(anal_df$urban_rate_10y))))
 cat("气候组分布:\n"); print(count(anal_df, koppen_group))
 
 
 # G. OLS 回归（3个投资变量分别单独入模）
 # -----------------------------------------------------------------------------
-geo_vars <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
+# 地理控制变量（基础）
+geo_vars      <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
+# 扩展控制变量（+人均GDP + 城镇化率）
+geo_vars_ext  <- c(geo_vars, "pgdp_10y_w", "urban_rate_10y_w")
 
 # 3个投资变量定义（原始变量名 + winsorize后变量名 + 标签）
 invest_vars <- list(
@@ -455,41 +492,50 @@ invest_vars <- list(
   list(raw = "pa_built_latest", w = "pa_built_latest_w", label = "最新一年")
 )
 
-run_ols_var <- function(df, var, label) {
-  d <- df %>% filter(!is.na(.data[[var]]), .data[[var]] > 0)
+run_ols_var <- function(df, var, label, ctrl_vars = geo_vars, ctrl_label = "基础") {
+  d <- df %>%
+    filter(!is.na(.data[[var]]), .data[[var]] > 0,
+           if_all(all_of(ctrl_vars), ~!is.na(.x)))
   if (nrow(d) < 20) return(NULL)
-  fml <- as.formula(paste("TRRI ~", var, "+",
-                          paste(geo_vars, collapse = "+")))
+  fml <- as.formula(paste("TRRI ~", var, "+", paste(ctrl_vars, collapse = "+")))
   m   <- lm(fml, data = d)
   s   <- summary(m)
   cr  <- s$coefficients[var, ]
   sig <- case_when(cr[4]<0.001~"***", cr[4]<0.01~"**",
                    cr[4]<0.05~"*",   cr[4]<0.1~".", TRUE~"ns")
-  cat(sprintf("\n[%s] n=%d  β=%.4f  SE=%.4f  t=%.3f  p=%.4f%s  R²=%.3f\n",
-              label, nrow(d), cr[1], cr[2], cr[3], cr[4], sig, s$adj.r.squared))
-  list(model=m, summary=s, coef=cr, sig=sig, n=nrow(d), var=var, label=label)
+  cat(sprintf("\n[%s | 控制=%s] n=%d  β=%.4f  SE=%.4f  t=%.3f  p=%.4f%s  R²=%.3f\n",
+              label, ctrl_label, nrow(d), cr[1], cr[2], cr[3], cr[4], sig, s$adj.r.squared))
+  list(model=m, summary=s, coef=cr, sig=sig, n=nrow(d),
+       var=var, label=label, ctrl_label=ctrl_label)
 }
 
 cat("\n=== G. OLS 回归（因变量：TRRI，3个投资变量分别入模）===\n")
+cat("\n--- 基础控制（地理+气候区）---\n")
 ols_list <- map(invest_vars, function(v)
-  run_ols_var(anal_df, v$w, v$label))
+  run_ols_var(anal_df, v$w, v$label, ctrl_vars = geo_vars, ctrl_label = "基础"))
 names(ols_list) <- sapply(invest_vars, `[[`, "raw")
 
-# 取pa_built_10y作为后续代表性汇总变量
-ols_main <- ols_list[["pa_built_10y"]]
+cat("\n--- 扩展控制（+人均GDP + 城镇化率）---\n")
+ols_list_ext <- map(invest_vars, function(v)
+  run_ols_var(anal_df, v$w, v$label, ctrl_vars = geo_vars_ext, ctrl_label = "扩展"))
+names(ols_list_ext) <- sapply(invest_vars, `[[`, "raw")
+
+# 取pa_built_10y扩展版作为后续代表性汇总变量
+ols_main <- ols_list_ext[["pa_built_10y"]] %||% ols_list[["pa_built_10y"]]
 s_ols    <- ols_main$summary
 cr_inv   <- ols_main$coef
 sig_inv  <- ols_main$sig
 main_var <- "pa_built_10y_w"
 
-# 回归系数汇总表
-coef_tbl <- map_dfr(invest_vars, function(v) {
-  obj <- ols_list[[v$raw]]
+# 汇总：基础 + 扩展两版系数并排
+extract_coef_row <- function(obj, model_label) {
   if (is.null(obj)) return(NULL)
   cr <- obj$coef
   tibble(
-    variable    = v$raw,
-    label       = v$label,
+    控制变量    = obj$ctrl_label,
+    model       = model_label,
+    variable    = obj$var,
+    label       = obj$label,
     n           = obj$n,
     beta        = round(cr[1], 6),
     se          = round(cr[2], 6),
@@ -501,10 +547,17 @@ coef_tbl <- map_dfr(invest_vars, function(v) {
                          "↑ 投资增加→TRRI上升（韧性增强）",
                          "↓ 投资增加→TRRI下降（韧性减弱）")
   )
-})
+}
 
-cat("\n=== G. 回归系数汇总（站点级，3个投资变量）===\n")
-print(coef_tbl %>% dplyr::select(label, n, beta, se, p_val, sig, direction, r2_adj_full))
+coef_tbl <- bind_rows(
+  map_dfr(invest_vars, function(v)
+    extract_coef_row(ols_list[[v$raw]],     "OLS_基础控制")),
+  map_dfr(invest_vars, function(v)
+    extract_coef_row(ols_list_ext[[v$raw]], "OLS_扩展控制"))
+) %>% arrange(variable, 控制变量)
+
+cat("\n=== G. 回归系数汇总（站点级，基础 vs 扩展控制）===\n")
+print(coef_tbl %>% dplyr::select(控制变量, label, n, beta, se, p_val, sig, direction, r2_adj_full))
 write_csv(coef_tbl, file.path(OUT, "ols_coef_invest.csv"))
 cat("-> ols_coef_invest.csv\n")
 
@@ -517,56 +570,61 @@ cat("-> ols_coef_invest.csv\n")
 # 伪R²：McFadden's R² = 1 - logLik(full)/logLik(null)
 # -----------------------------------------------------------------------------
 
-run_olr_var <- function(df, var, label, outcome = "TRRI") {
-  d <- df %>% filter(!is.na(.data[[var]]), .data[[var]] > 0,
-                     !is.na(.data[[outcome]]))
+run_olr_var <- function(df, var, label, ctrl_vars = geo_vars,
+                        ctrl_label = "基础", outcome = "TRRI") {
+  d <- df %>%
+    filter(!is.na(.data[[var]]), .data[[var]] > 0,
+           !is.na(.data[[outcome]]),
+           if_all(all_of(ctrl_vars), ~!is.na(.x)))
   if (nrow(d) < 20) return(NULL)
-  # 因变量转有序因子（若为连续则四舍五入后转）
   ord_vals <- sort(unique(round(d[[outcome]])))
   d$Y_ord  <- factor(round(d[[outcome]]), levels = ord_vals, ordered = TRUE)
-  fml <- as.formula(paste("Y_ord ~", var, "+",
-                           paste(geo_vars, collapse = "+")))
+  fml <- as.formula(paste("Y_ord ~", var, "+", paste(ctrl_vars, collapse = "+")))
   m <- tryCatch(
     MASS::polr(fml, data = d, Hess = TRUE, method = "logistic"),
     error = function(e) { cat(sprintf("  [polr error: %s]\n", e$message)); NULL }
   )
   if (is.null(m)) return(NULL)
   s  <- summary(m)
-  cr <- s$coefficients[var, ]           # Estimate / Std. Error / t value
+  cr <- s$coefficients[var, ]
   z  <- cr["t value"]
   pval <- 2 * pnorm(abs(z), lower.tail = FALSE)
   sig  <- case_when(pval < 0.001 ~ "***", pval < 0.01 ~ "**",
-                    pval < 0.05  ~ "*",   pval < 0.1  ~ ".",  TRUE ~ "ns")
-  # McFadden 伪 R²
+                    pval < 0.05  ~ "*",   pval < 0.1  ~ ".", TRUE ~ "ns")
   m0 <- tryCatch(
     MASS::polr(Y_ord ~ 1, data = d, Hess = FALSE, method = "logistic"),
     error = function(e) NULL)
   mcf <- if (!is.null(m0))
     round(1 - as.numeric(logLik(m)) / as.numeric(logLik(m0)), 4)
   else NA_real_
-  cat(sprintf("\n[%s] n=%d  coef=%.4f  SE=%.4f  z=%.3f  p=%.4f%s  McF_R²=%.4f\n",
-              label, nrow(d), cr[1], cr[2], z, pval, sig, mcf))
-  list(model = m, coef = cr, pval = pval, sig = sig,
-       n = nrow(d), var = var, label = label, mcfadden = mcf)
+  cat(sprintf("\n[%s | 控制=%s] n=%d  coef=%.4f  SE=%.4f  z=%.3f  p=%.4f%s  McF=%.4f\n",
+              label, ctrl_label, nrow(d), cr[1], cr[2], z, pval, sig, mcf))
+  list(model = m, coef = cr, pval = pval, sig = sig, n = nrow(d),
+       var = var, label = label, ctrl_label = ctrl_label, mcfadden = mcf)
 }
 
-cat("\n=== G2. 有序Logit（站点级，因变量=TRRI有序因子）===\n")
+cat("\n=== G2. 有序Logit（站点级，基础 vs 扩展控制）===\n")
+cat("\n--- 基础控制 ---\n")
 olr_list <- map(invest_vars, function(v)
-  run_olr_var(anal_df, v$w, v$label, outcome = "TRRI"))
+  run_olr_var(anal_df, v$w, v$label, ctrl_vars = geo_vars, ctrl_label = "基础"))
 names(olr_list) <- sapply(invest_vars, `[[`, "raw")
 
-olr_coef_tbl <- map_dfr(invest_vars, function(v) {
-  obj <- olr_list[[v$raw]]
+cat("\n--- 扩展控制（+人均GDP + 城镇化率）---\n")
+olr_list_ext <- map(invest_vars, function(v)
+  run_olr_var(anal_df, v$w, v$label, ctrl_vars = geo_vars_ext, ctrl_label = "扩展"))
+names(olr_list_ext) <- sapply(invest_vars, `[[`, "raw")
+
+extract_olr_row <- function(obj) {
   if (is.null(obj)) return(NULL)
   cr <- obj$coef
   tibble(
-    model       = "有序Logit",
-    variable    = v$raw,
-    label       = v$label,
+    控制变量    = obj$ctrl_label,
+    variable    = obj$var,
+    label       = obj$label,
     n           = obj$n,
-    coef        = round(cr[1], 6),   # log-odds scale
+    coef        = round(cr[1], 6),
     se          = round(cr[2], 6),
-    z_val       = round(cr[3], 3),
+    z_val       = round(cr["t value"], 3),
     p_val       = round(obj$pval, 4),
     sig         = obj$sig,
     mcfadden_r2 = obj$mcfadden,
@@ -574,22 +632,34 @@ olr_coef_tbl <- map_dfr(invest_vars, function(v) {
                          "↑ 投资增加→倾向更高TRRI（韧性增强）",
                          "↓ 投资增加→倾向更低TRRI（韧性减弱）")
   )
-})
+}
 
-# OLS与有序Logit并排对比
+olr_coef_tbl <- bind_rows(
+  map_dfr(invest_vars, function(v) extract_olr_row(olr_list[[v$raw]])),
+  map_dfr(invest_vars, function(v) extract_olr_row(olr_list_ext[[v$raw]]))
+) %>% arrange(variable, 控制变量)
+
+# OLS与有序Logit并排对比（扩展控制版）
 olr_compare <- bind_rows(
   coef_tbl %>%
+    filter(控制变量 == "扩展") %>%
     mutate(model = "OLS") %>%
     dplyr::rename(coef = beta, z_val = t_val, mcfadden_r2 = r2_adj_full) %>%
-    dplyr::select(model, variable, label, n, coef, se, z_val, p_val, sig,
-                  mcfadden_r2, direction),
-  olr_coef_tbl
+    dplyr::select(控制变量, model, variable, label, n, coef, se, z_val,
+                  p_val, sig, mcfadden_r2, direction),
+  olr_coef_tbl %>%
+    filter(控制变量 == "扩展") %>%
+    mutate(model = "有序Logit")
 ) %>% arrange(variable, model)
 
-cat("\n=== G2. OLS vs 有序Logit 系数对比（站点级）===\n")
+cat("\n=== G2. OLS vs 有序Logit 系数对比（扩展控制，站点级）===\n")
 print(olr_compare %>% dplyr::select(model, label, n, coef, se, p_val, sig, direction))
-write_csv(olr_coef_tbl,  file.path(OUT, "olr_coef_invest.csv"))
-write_csv(olr_compare,   file.path(OUT, "olr_vs_ols_compare.csv"))
+
+cat("\n=== G2. 有序Logit 基础 vs 扩展控制 对比 ===\n")
+print(olr_coef_tbl %>% dplyr::select(控制变量, label, n, coef, se, p_val, sig, direction))
+
+write_csv(olr_coef_tbl, file.path(OUT, "olr_coef_invest.csv"))
+write_csv(olr_compare,  file.path(OUT, "olr_vs_ols_compare.csv"))
 cat("-> olr_coef_invest.csv\n-> olr_vs_ols_compare.csv\n")
 
 
@@ -1142,6 +1212,8 @@ city_agg <- anal_df %>%
     pa_built_10y    = first(pa_built_10y),
     pa_built_5y     = first(pa_built_5y),
     pa_built_latest = first(pa_built_latest),
+    pgdp_10y_w      = first(pgdp_10y_w),
+    urban_rate_10y_w = first(urban_rate_10y_w),
     longitude    = mean(longitude,   na.rm = TRUE),
     latitude     = mean(latitude,    na.rm = TRUE),
     koppen_group = first(koppen_group),
@@ -1156,18 +1228,25 @@ city_agg <- anal_df %>%
 cat(sprintf("城市数: %d（站点数中位数: %.0f）\n",
             nrow(city_agg), median(city_agg$n_stations)))
 
-# --- 城市级 OLS 回归系数（投资对TRRI均值的效应）---
-run_ols_city <- function(df, inv_var, var_label) {
-  d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0,
-                     !is.na(TRRI_mean))
+# --- 城市级 OLS 回归系数（投资对TRRI均值的效应，基础 vs 扩展控制）---
+run_ols_city <- function(df, inv_var, var_label,
+                          ctrl_extra = character(0), ctrl_label = "基础") {
+  ctrl_all <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D",
+                ctrl_extra)
+  d <- df %>%
+    filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0,
+           !is.na(TRRI_mean),
+           if_all(all_of(ctrl_extra), ~!is.na(.x)))
   if (nrow(d) < 10) return(NULL)
   d$inv_w <- as.numeric(scale(d[[inv_var]]))
-  m <- lm(TRRI_mean ~ inv_w + longitude + latitude + koppen_B + koppen_C + koppen_D, data = d)
+  fml <- as.formula(paste("TRRI_mean ~ inv_w +", paste(ctrl_all, collapse = "+")))
+  m <- lm(fml, data = d)
   s <- summary(m)
   cr <- s$coefficients["inv_w", ]
   sig <- case_when(cr[4]<0.001~"***", cr[4]<0.01~"**", cr[4]<0.05~"*",
                    cr[4]<0.1~".", TRUE~"ns")
   tibble(
+    控制变量    = ctrl_label,
     level       = "城市级（聚合）",
     variable    = inv_var,
     label       = var_label,
@@ -1184,42 +1263,56 @@ run_ols_city <- function(df, inv_var, var_label) {
   )
 }
 
-ols_city_tbl <- map_dfr(invest_vars, function(v)
-  run_ols_city(city_agg, v$raw, paste0(v$label, "（城市级）")))
+cat("\n--- 基础控制 ---\n")
+ols_city_base <- map_dfr(invest_vars, function(v)
+  run_ols_city(city_agg, v$raw, paste0(v$label, "（城市级）"),
+               ctrl_extra = character(0), ctrl_label = "基础"))
 
-cat("\n=== L. 城市级OLS回归系数 ===\n")
-print(ols_city_tbl %>% dplyr::select(label, n, beta, se, p_val, sig, direction, r2_adj_full))
+cat("\n--- 扩展控制（+人均GDP + 城镇化率）---\n")
+ols_city_ext <- map_dfr(invest_vars, function(v)
+  run_ols_city(city_agg, v$raw, paste0(v$label, "（城市级）"),
+               ctrl_extra = c("pgdp_10y_w", "urban_rate_10y_w"), ctrl_label = "扩展"))
+
+ols_city_tbl <- bind_rows(ols_city_base, ols_city_ext) %>%
+  arrange(variable, 控制变量)
+
+cat("\n=== L. 城市级OLS回归系数（基础 vs 扩展控制）===\n")
+print(ols_city_tbl %>% dplyr::select(控制变量, label, n, beta, se, p_val, sig, direction, r2_adj_full))
 write_csv(ols_city_tbl, file.path(OUT, "ols_coef_invest_city.csv"))
 cat("-> ols_coef_invest_city.csv\n")
 
-# 与站点级系数合并输出一张对比表
-if (file.exists(file.path(OUT, "ols_coef_invest.csv"))) {
-  station_coef <- read_csv(file.path(OUT, "ols_coef_invest.csv"), show_col_types = FALSE) %>%
-    mutate(level = "站点级")
-  ols_compare <- bind_rows(station_coef, ols_city_tbl) %>%
-    dplyr::select(level, label, n, beta, se, p_val, sig, direction, r2_adj_full)
-  write_csv(ols_compare, file.path(OUT, "ols_coef_invest_compare.csv"))
-  cat("-> ols_coef_invest_compare.csv（站点级+城市级对比）\n")
-  cat("\n=== 站点级 vs 城市级 OLS系数对比 ===\n")
-  print(ols_compare)
-}
+# 与站点级系数合并输出一张对比表（扩展控制版）
+station_coef_ext <- coef_tbl %>%
+  filter(控制变量 == "扩展") %>%
+  mutate(level = "站点级")
+ols_compare <- bind_rows(station_coef_ext, ols_city_ext) %>%
+  dplyr::select(控制变量, level, label, n, beta, se, p_val, sig, direction, r2_adj_full)
+write_csv(ols_compare, file.path(OUT, "ols_coef_invest_compare.csv"))
+cat("-> ols_coef_invest_compare.csv（扩展控制，站点级+城市级对比）\n")
+cat("\n=== 扩展控制：站点级 vs 城市级 OLS对比 ===\n")
+print(ols_compare)
 
 # G2b. 有序Logit：城市级（TRRI_mean四舍五入后视为有序因子）
 # 注：城市级因变量为站点TRRI均值（连续），四舍五入后作为近似有序处理，
 #     结果仅供参考，OLS仍为城市级主要回归方法。
 cat("\n=== G2b. 有序Logit（城市级，TRRI_mean四舍五入）===\n")
 
-run_olr_city <- function(df, inv_var, var_label) {
-  d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0,
-                     !is.na(TRRI_mean))
+run_olr_city <- function(df, inv_var, var_label, ctrl_extra = character(0),
+                         ctrl_label = "基础") {
+  ctrl_all <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D",
+                ctrl_extra)
+  d <- df %>%
+    filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0,
+           !is.na(TRRI_mean),
+           if_all(all_of(ctrl_extra), ~!is.na(.x)))
   if (nrow(d) < 15) return(NULL)
   d$inv_w <- as.numeric(scale(d[[inv_var]]))
   d$Y_ord <- factor(round(d$TRRI_mean),
                     levels = sort(unique(round(d$TRRI_mean))),
                     ordered = TRUE)
+  fml <- as.formula(paste("Y_ord ~ inv_w +", paste(ctrl_all, collapse = "+")))
   m <- tryCatch(
-    MASS::polr(Y_ord ~ inv_w + longitude + latitude + koppen_B + koppen_C + koppen_D,
-               data = d, Hess = TRUE, method = "logistic"),
+    MASS::polr(fml, data = d, Hess = TRUE, method = "logistic"),
     error = function(e) { cat(sprintf("  [polr error: %s]\n", e$message)); NULL }
   )
   if (is.null(m)) return(NULL)
@@ -1235,9 +1328,10 @@ run_olr_city <- function(df, inv_var, var_label) {
   mcf <- if (!is.null(m0))
     round(1 - as.numeric(logLik(m)) / as.numeric(logLik(m0)), 4)
   else NA_real_
-  cat(sprintf("\n[%s] n=%d  coef=%.4f  SE=%.4f  z=%.3f  p=%.4f%s  McF_R²=%.4f\n",
-              var_label, nrow(d), cr[1], cr[2], z, pval, sig, mcf))
+  cat(sprintf("\n[%s | 控制=%s] n=%d  coef=%.4f  z=%.3f  p=%.4f%s\n",
+              var_label, ctrl_label, nrow(d), cr[1], z, pval, sig))
   tibble(
+    控制变量    = ctrl_label,
     model       = "有序Logit",
     level       = "城市级（聚合，TRRI_mean四舍五入）",
     variable    = inv_var,
@@ -1255,10 +1349,20 @@ run_olr_city <- function(df, inv_var, var_label) {
   )
 }
 
-olr_city_tbl <- map_dfr(invest_vars, function(v)
-  run_olr_city(city_agg, v$raw, v$label))
+cat("\n--- 基础控制 ---\n")
+olr_city_base <- map_dfr(invest_vars, function(v)
+  run_olr_city(city_agg, v$raw, v$label, ctrl_extra = character(0), ctrl_label = "基础"))
 
-print(olr_city_tbl %>% dplyr::select(label, n, coef, se, p_val, sig, direction))
+cat("\n--- 扩展控制（+人均GDP + 城镇化率）---\n")
+olr_city_ext <- map_dfr(invest_vars, function(v)
+  run_olr_city(city_agg, v$raw, v$label,
+               ctrl_extra = c("pgdp_10y_w", "urban_rate_10y_w"),
+               ctrl_label = "扩展"))
+
+olr_city_tbl <- bind_rows(olr_city_base, olr_city_ext) %>%
+  arrange(variable, 控制变量)
+
+print(olr_city_tbl %>% dplyr::select(控制变量, label, n, coef, se, p_val, sig, direction))
 write_csv(olr_city_tbl, file.path(OUT, "olr_coef_invest_city.csv"))
 cat("-> olr_coef_invest_city.csv\n")
 
