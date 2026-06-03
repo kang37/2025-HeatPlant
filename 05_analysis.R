@@ -30,7 +30,7 @@
 
 pacman::p_load(dplyr, tidyr, purrr, ggplot2, stringr, readr,
                vegan, tibble, scales, showtext, sysfonts,
-               targets, rEDM, strucchange)
+               targets, rEDM, strucchange, MASS)
 
 setwd("/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant")
 OUT     <- "data_proc/output_10y_built_up_05"
@@ -507,6 +507,90 @@ cat("\n=== G. 回归系数汇总（站点级，3个投资变量）===\n")
 print(coef_tbl %>% dplyr::select(label, n, beta, se, p_val, sig, direction, r2_adj_full))
 write_csv(coef_tbl, file.path(OUT, "ols_coef_invest.csv"))
 cat("-> ols_coef_invest.csv\n")
+
+
+# G2. 有序 Logit 回归（MASS::polr，TRRI视为有序因子）
+# -----------------------------------------------------------------------------
+# TRRI取值1..18，天然是有序离散变量，有序Logit比OLS更符合数据结构。
+# polr() 不直接提供p值，用 z = coef/SE（大样本正态近似）计算。
+# 系数解释：正值表示投资增加 → 倾向于更高TRRI等级（韧性增强）。
+# 伪R²：McFadden's R² = 1 - logLik(full)/logLik(null)
+# -----------------------------------------------------------------------------
+
+run_olr_var <- function(df, var, label, outcome = "TRRI") {
+  d <- df %>% filter(!is.na(.data[[var]]), .data[[var]] > 0,
+                     !is.na(.data[[outcome]]))
+  if (nrow(d) < 20) return(NULL)
+  # 因变量转有序因子（若为连续则四舍五入后转）
+  ord_vals <- sort(unique(round(d[[outcome]])))
+  d$Y_ord  <- factor(round(d[[outcome]]), levels = ord_vals, ordered = TRUE)
+  fml <- as.formula(paste("Y_ord ~", var, "+",
+                           paste(geo_vars, collapse = "+")))
+  m <- tryCatch(
+    MASS::polr(fml, data = d, Hess = TRUE, method = "logistic"),
+    error = function(e) { cat(sprintf("  [polr error: %s]\n", e$message)); NULL }
+  )
+  if (is.null(m)) return(NULL)
+  s  <- summary(m)
+  cr <- s$coefficients[var, ]           # Estimate / Std. Error / t value
+  z  <- cr["t value"]
+  pval <- 2 * pnorm(abs(z), lower.tail = FALSE)
+  sig  <- case_when(pval < 0.001 ~ "***", pval < 0.01 ~ "**",
+                    pval < 0.05  ~ "*",   pval < 0.1  ~ ".",  TRUE ~ "ns")
+  # McFadden 伪 R²
+  m0 <- tryCatch(
+    MASS::polr(Y_ord ~ 1, data = d, Hess = FALSE, method = "logistic"),
+    error = function(e) NULL)
+  mcf <- if (!is.null(m0))
+    round(1 - as.numeric(logLik(m)) / as.numeric(logLik(m0)), 4)
+  else NA_real_
+  cat(sprintf("\n[%s] n=%d  coef=%.4f  SE=%.4f  z=%.3f  p=%.4f%s  McF_R²=%.4f\n",
+              label, nrow(d), cr[1], cr[2], z, pval, sig, mcf))
+  list(model = m, coef = cr, pval = pval, sig = sig,
+       n = nrow(d), var = var, label = label, mcfadden = mcf)
+}
+
+cat("\n=== G2. 有序Logit（站点级，因变量=TRRI有序因子）===\n")
+olr_list <- map(invest_vars, function(v)
+  run_olr_var(anal_df, v$w, v$label, outcome = "TRRI"))
+names(olr_list) <- sapply(invest_vars, `[[`, "raw")
+
+olr_coef_tbl <- map_dfr(invest_vars, function(v) {
+  obj <- olr_list[[v$raw]]
+  if (is.null(obj)) return(NULL)
+  cr <- obj$coef
+  tibble(
+    model       = "有序Logit",
+    variable    = v$raw,
+    label       = v$label,
+    n           = obj$n,
+    coef        = round(cr[1], 6),   # log-odds scale
+    se          = round(cr[2], 6),
+    z_val       = round(cr[3], 3),
+    p_val       = round(obj$pval, 4),
+    sig         = obj$sig,
+    mcfadden_r2 = obj$mcfadden,
+    direction   = ifelse(cr[1] > 0,
+                         "↑ 投资增加→倾向更高TRRI（韧性增强）",
+                         "↓ 投资增加→倾向更低TRRI（韧性减弱）")
+  )
+})
+
+# OLS与有序Logit并排对比
+olr_compare <- bind_rows(
+  coef_tbl %>%
+    mutate(model = "OLS") %>%
+    dplyr::rename(coef = beta, z_val = t_val, mcfadden_r2 = r2_adj_full) %>%
+    dplyr::select(model, variable, label, n, coef, se, z_val, p_val, sig,
+                  mcfadden_r2, direction),
+  olr_coef_tbl
+) %>% arrange(variable, model)
+
+cat("\n=== G2. OLS vs 有序Logit 系数对比（站点级）===\n")
+print(olr_compare %>% dplyr::select(model, label, n, coef, se, p_val, sig, direction))
+write_csv(olr_coef_tbl,  file.path(OUT, "olr_coef_invest.csv"))
+write_csv(olr_compare,   file.path(OUT, "olr_vs_ols_compare.csv"))
+cat("-> olr_coef_invest.csv\n-> olr_vs_ols_compare.csv\n")
 
 
 # H. 方差分解（3个投资变量分别 vs 地理）
@@ -1119,6 +1203,65 @@ if (file.exists(file.path(OUT, "ols_coef_invest.csv"))) {
   cat("\n=== 站点级 vs 城市级 OLS系数对比 ===\n")
   print(ols_compare)
 }
+
+# G2b. 有序Logit：城市级（TRRI_mean四舍五入后视为有序因子）
+# 注：城市级因变量为站点TRRI均值（连续），四舍五入后作为近似有序处理，
+#     结果仅供参考，OLS仍为城市级主要回归方法。
+cat("\n=== G2b. 有序Logit（城市级，TRRI_mean四舍五入）===\n")
+
+run_olr_city <- function(df, inv_var, var_label) {
+  d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0,
+                     !is.na(TRRI_mean))
+  if (nrow(d) < 15) return(NULL)
+  d$inv_w <- as.numeric(scale(d[[inv_var]]))
+  d$Y_ord <- factor(round(d$TRRI_mean),
+                    levels = sort(unique(round(d$TRRI_mean))),
+                    ordered = TRUE)
+  m <- tryCatch(
+    MASS::polr(Y_ord ~ inv_w + longitude + latitude + koppen_B + koppen_C + koppen_D,
+               data = d, Hess = TRUE, method = "logistic"),
+    error = function(e) { cat(sprintf("  [polr error: %s]\n", e$message)); NULL }
+  )
+  if (is.null(m)) return(NULL)
+  s    <- summary(m)
+  cr   <- s$coefficients["inv_w", ]
+  z    <- cr["t value"]
+  pval <- 2 * pnorm(abs(z), lower.tail = FALSE)
+  sig  <- case_when(pval < 0.001 ~ "***", pval < 0.01 ~ "**",
+                    pval < 0.05  ~ "*",   pval < 0.1  ~ ".", TRUE ~ "ns")
+  m0 <- tryCatch(
+    MASS::polr(Y_ord ~ 1, data = d, Hess = FALSE, method = "logistic"),
+    error = function(e) NULL)
+  mcf <- if (!is.null(m0))
+    round(1 - as.numeric(logLik(m)) / as.numeric(logLik(m0)), 4)
+  else NA_real_
+  cat(sprintf("\n[%s] n=%d  coef=%.4f  SE=%.4f  z=%.3f  p=%.4f%s  McF_R²=%.4f\n",
+              var_label, nrow(d), cr[1], cr[2], z, pval, sig, mcf))
+  tibble(
+    model       = "有序Logit",
+    level       = "城市级（聚合，TRRI_mean四舍五入）",
+    variable    = inv_var,
+    label       = var_label,
+    n           = nrow(d),
+    coef        = round(cr[1], 6),
+    se          = round(cr[2], 6),
+    z_val       = round(z, 3),
+    p_val       = round(pval, 4),
+    sig         = sig,
+    mcfadden_r2 = mcf,
+    direction   = ifelse(cr[1] > 0,
+                         "↑ 投资增加→倾向更高TRRI（韧性增强）",
+                         "↓ 投资增加→倾向更低TRRI（韧性减弱）")
+  )
+}
+
+olr_city_tbl <- map_dfr(invest_vars, function(v)
+  run_olr_city(city_agg, v$raw, v$label))
+
+print(olr_city_tbl %>% dplyr::select(label, n, coef, se, p_val, sig, direction))
+write_csv(olr_city_tbl, file.path(OUT, "olr_coef_invest_city.csv"))
+cat("-> olr_coef_invest_city.csv\n")
+
 
 geo_vars_city <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
 
