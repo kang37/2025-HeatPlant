@@ -663,6 +663,170 @@ write_csv(olr_compare,  file.path(OUT, "olr_vs_ols_compare.csv"))
 cat("-> olr_coef_invest.csv\n-> olr_vs_ols_compare.csv\n")
 
 
+# G3. 分气候区回归（OLS + 有序Logit，各气候区分别跑）
+# 全国整体不显著不代表亚组内不显著；B区（干旱区）方差分解信号最强，重点关注。
+# 控制变量：经纬度（气候区内不再加气候区哑变量，因为已分层）
+# -----------------------------------------------------------------------------
+
+cat("\n=== G3. 分气候区回归 ===\n")
+
+run_ols_koppen <- function(df, inv_var, inv_label, grp, ctrl = c("longitude","latitude")) {
+  d <- df %>% filter(koppen_group == grp,
+                     !is.na(.data[[inv_var]]), .data[[inv_var]] > 0)
+  if (nrow(d) < 15) {
+    cat(sprintf("  [%s / %s] 跳过 n=%d\n", grp, inv_label, nrow(d)))
+    return(NULL)
+  }
+  # 如有扩展控制变量则使用
+  ctrl_use <- ctrl[ctrl %in% names(d) &
+                     sapply(ctrl, function(v) sum(!is.na(d[[v]])) > 0)]
+  d2 <- d %>% filter(if_all(all_of(ctrl_use), ~!is.na(.x)))
+  if (nrow(d2) < 15) return(NULL)
+  fml <- as.formula(paste("TRRI ~", inv_var, "+", paste(ctrl_use, collapse = "+")))
+  m   <- tryCatch(lm(fml, data = d2), error = function(e) NULL)
+  if (is.null(m)) return(NULL)
+  s   <- summary(m)
+  cr  <- s$coefficients[inv_var, ]
+  sig <- case_when(cr[4]<0.001~"***", cr[4]<0.01~"**",
+                   cr[4]<0.05~"*",   cr[4]<0.1~".", TRUE~"ns")
+  cat(sprintf("  OLS  [%s / %s] n=%d  β=%.4f  SE=%.4f  p=%.4f%s\n",
+              grp, inv_label, nrow(d2), cr[1], cr[2], cr[4], sig))
+  tibble(model="OLS", koppen=grp, variable=inv_var, label=inv_label,
+         n=nrow(d2), beta=round(cr[1],6), se=round(cr[2],6),
+         t_val=round(cr[3],3), p_val=round(cr[4],4), sig=sig,
+         r2_adj=round(s$adj.r.squared,4),
+         direction=ifelse(cr[1]>0, "↑韧性增强", "↓韧性减弱"))
+}
+
+run_olr_koppen <- function(df, inv_var, inv_label, grp, ctrl = c("longitude","latitude")) {
+  d <- df %>% filter(koppen_group == grp,
+                     !is.na(.data[[inv_var]]), .data[[inv_var]] > 0)
+  if (nrow(d) < 15) return(NULL)
+  ctrl_use <- ctrl[ctrl %in% names(d) &
+                     sapply(ctrl, function(v) sum(!is.na(d[[v]])) > 0)]
+  d2 <- d %>% filter(if_all(all_of(ctrl_use), ~!is.na(.x)))
+  if (nrow(d2) < 15) return(NULL)
+  d2$Y_ord <- factor(d2$TRRI, levels = sort(unique(d2$TRRI)), ordered = TRUE)
+  fml <- as.formula(paste("Y_ord ~", inv_var, "+", paste(ctrl_use, collapse = "+")))
+  m <- tryCatch(
+    MASS::polr(fml, data = d2, Hess = TRUE, method = "logistic"),
+    error = function(e) NULL)
+  if (is.null(m)) return(NULL)
+  s    <- summary(m)
+  cr   <- s$coefficients[inv_var, ]
+  z    <- cr["t value"]
+  pval <- 2 * pnorm(abs(z), lower.tail = FALSE)
+  sig  <- case_when(pval<0.001~"***", pval<0.01~"**",
+                    pval<0.05~"*",   pval<0.1~".", TRUE~"ns")
+  cat(sprintf("  OLR  [%s / %s] n=%d  coef=%.4f  SE=%.4f  p=%.4f%s\n",
+              grp, inv_label, nrow(d2), cr[1], cr[2], pval, sig))
+  tibble(model="有序Logit", koppen=grp, variable=inv_var, label=inv_label,
+         n=nrow(d2), beta=round(cr[1],6), se=round(cr[2],6),
+         t_val=round(z,3), p_val=round(pval,4), sig=sig,
+         r2_adj=NA_real_,
+         direction=ifelse(cr[1]>0, "↑韧性增强", "↓韧性减弱"))
+}
+
+koppen_groups_all <- c("ALL", sort(unique(anal_df$koppen_group)))
+
+# 基础控制（经纬度）；若需扩展可改为 c("longitude","latitude","pgdp_10y_w","urban_rate_10y_w")
+ctrl_koppen <- c("longitude", "latitude")
+
+koppen_reg_tbl <- map_dfr(koppen_groups_all, function(grp) {
+  df_g <- if (grp == "ALL") anal_df else filter(anal_df, koppen_group == grp)
+  # ALL组保留气候区哑变量
+  ctrl_g <- if (grp == "ALL") geo_vars else ctrl_koppen
+  map_dfr(invest_vars, function(v) {
+    bind_rows(
+      run_ols_koppen(df_g, v$w, v$label, grp, ctrl = ctrl_g),
+      run_olr_koppen(df_g, v$w, v$label, grp, ctrl = ctrl_g)
+    )
+  })
+})
+
+cat("\n=== G3. 分气候区回归结果汇总 ===\n")
+print(koppen_reg_tbl %>%
+        arrange(koppen, variable, model) %>%
+        dplyr::select(model, koppen, label, n, beta, se, p_val, sig, direction, r2_adj))
+
+write_csv(koppen_reg_tbl, file.path(OUT, "reg_by_koppen.csv"))
+cat("-> reg_by_koppen.csv\n")
+
+# 汇总图：各气候区 × 各投资变量的p值热图（直观看哪个组合接近显著）
+if (nrow(koppen_reg_tbl) > 0) {
+  inv_label_levels <- sapply(invest_vars, `[[`, "label")
+  koppen_name_map  <- c(ALL="全部", B="B(干旱)", C="C(温带)", D="D(大陆)")
+
+  p_koppen_reg <- koppen_reg_tbl %>%
+    filter(koppen %in% names(koppen_name_map)) %>%
+    mutate(
+      koppen_label = factor(koppen_name_map[koppen],
+                            levels = koppen_name_map[intersect(
+                              c("ALL","B","C","D"), koppen_reg_tbl$koppen)]),
+      inv_label    = factor(label, levels = inv_label_levels),
+      sig_label    = case_when(
+        p_val < 0.05  ~ sprintf("p=%.3f*", p_val),
+        p_val < 0.1   ~ sprintf("p=%.3f.", p_val),
+        TRUE          ~ sprintf("p=%.3f",  p_val)
+      ),
+      p_fill = pmin(p_val, 0.5)   # 截断到0.5，增强低p值色差
+    ) %>%
+    filter(!is.na(koppen_label), !is.na(inv_label)) %>%
+    ggplot(aes(x = inv_label, y = koppen_label, fill = p_fill)) +
+    geom_tile(color = "white", linewidth = 0.6) +
+    geom_text(aes(label = sig_label), size = 3.8, family = "heiti") +
+    scale_fill_gradient2(
+      low = "#D73027", mid = "#FFFFBF", high = "#F0F0F0",
+      midpoint = 0.05, limits = c(0, 0.5),
+      name = "p值\n（红=显著）") +
+    facet_wrap(~model, nrow = 1) +
+    labs(
+      title    = "分气候区回归：投资对TRRI效应的p值",
+      subtitle = "红色=p<0.05显著；*p<0.05  .p<0.1",
+      x = NULL, y = NULL
+    ) +
+    theme_cn() +
+    theme(axis.text.x = element_text(angle = 20, hjust = 1),
+          panel.grid  = element_blank())
+
+  ggsave(file.path(OUT, "reg_by_koppen_pval.png"),
+         p_koppen_reg, width = 14, height = 6, dpi = 300)
+  cat("-> reg_by_koppen_pval.png\n")
+
+  # β方向图
+  p_koppen_beta <- koppen_reg_tbl %>%
+    filter(koppen %in% names(koppen_name_map)) %>%
+    mutate(
+      koppen_label = factor(koppen_name_map[koppen],
+                            levels = koppen_name_map[intersect(
+                              c("ALL","B","C","D"), koppen_reg_tbl$koppen)]),
+      inv_label    = factor(label, levels = inv_label_levels),
+      beta_show    = pmax(pmin(beta, 0.3), -0.3)   # 截断防极端值
+    ) %>%
+    filter(!is.na(koppen_label), !is.na(inv_label)) %>%
+    ggplot(aes(x = inv_label, y = koppen_label, fill = beta_show)) +
+    geom_tile(color = "white", linewidth = 0.6) +
+    geom_text(aes(label = sprintf("β=%.3f\n%s", beta, sig)),
+              size = 3.5, family = "heiti") +
+    scale_fill_gradient2(
+      low = "#4575B4", mid = "white", high = "#D73027",
+      midpoint = 0, name = "β（截断±0.3）\n蓝=负 红=正") +
+    facet_wrap(~model, nrow = 1) +
+    labs(
+      title    = "分气候区回归：投资对TRRI的效应方向（β）",
+      subtitle = "***p<0.001  **p<0.01  *p<0.05  .p<0.1  ns不显著",
+      x = NULL, y = NULL
+    ) +
+    theme_cn() +
+    theme(axis.text.x = element_text(angle = 20, hjust = 1),
+          panel.grid  = element_blank())
+
+  ggsave(file.path(OUT, "reg_by_koppen_beta.png"),
+         p_koppen_beta, width = 14, height = 6, dpi = 300)
+  cat("-> reg_by_koppen_beta.png\n")
+}
+
+
 # H. 方差分解（3个投资变量分别 vs 地理）
 # -----------------------------------------------------------------------------
 run_varpart <- function(df, inv_var, label) {
