@@ -340,14 +340,16 @@ print(count(trri_df, stype))
 
 # E. 投资与绿地结构变量
 # -----------------------------------------------------------------------------
-# E1: pa_built_10y = 近10年园林绿化投资均值 / 建成区绿地面积
-# E2: green_built_10y = 近10年建成区绿地面积均值（来自多年数据）
+# 投资变量（3个，分别单独进入模型）：
+#   pa_built_10y   : 2011-2020年均值 / 建成区绿地面积
+#   pa_built_5y    : 近5年均值（可用最新5年）/ 建成区绿地面积
+#   pa_built_latest: 最新一年 / 建成区绿地面积
 
 tar_load(green_invest_2020)
 tar_load(green_area_2020)
 tar_load(station_city_map)
 
-# --- E1: 投资变量 ---
+# --- E1: 读取投资原始数据 ---
 invest_raw0 <- read.csv("data_raw/green_invest/city_invest_data.csv",
                         check.names = FALSE)
 nc_inv <- ncol(invest_raw0)
@@ -358,10 +360,11 @@ invest_raw <- bind_cols(
   dplyr::select(invest_raw0, -city_raw)
 )
 
-year_cols <- paste0("inv_", 2002:2024)
+year_cols <- paste0("inv_", 2002:2030)
 year_cols <- year_cols[year_cols %in% names(invest_raw)]
 years_num <- as.integer(str_extract(year_cols, "\\d{4}$"))
 
+# 10年均值：2011-2020
 cols_10y <- year_cols[years_num >= 2011 & years_num <= 2020]
 inv_10y  <- rowMeans(
   dplyr::select(invest_raw, all_of(cols_10y)) %>%
@@ -369,6 +372,24 @@ inv_10y  <- rowMeans(
   na.rm = TRUE
 )
 
+# 近5年均值：可用年份中最新5年
+cols_5y <- tail(year_cols, 5)
+inv_5y  <- rowMeans(
+  dplyr::select(invest_raw, all_of(cols_5y)) %>%
+    mutate(across(everything(), as.numeric)),
+  na.rm = TRUE
+)
+
+# 最新一年
+col_latest <- tail(year_cols, 1)
+inv_latest <- as.numeric(invest_raw[[col_latest]])
+
+cat(sprintf("\n投资数据年份范围: %d - %d\n", min(years_num), max(years_num)))
+cat(sprintf("10年均值年份: %s\n", paste(years_num[years_num >= 2011 & years_num <= 2020], collapse = " ")))
+cat(sprintf("近5年均值年份: %s\n", paste(str_extract(cols_5y, "\\d{4}$"), collapse = " ")))
+cat(sprintf("最新年份: %s\n", str_extract(col_latest, "\\d{4}$")))
+
+# --- E2: 建成区绿地面积（用于计算单位面积投资）---
 green_2020 <- green_area_2020 %>%
   dplyr::select(city_name, area_built = area_green_built) %>%
   mutate(city_name = ifelse(str_detect(city_name, "市$"), city_name,
@@ -376,46 +397,23 @@ green_2020 <- green_area_2020 %>%
 
 invest_tbl <- bind_cols(
   dplyr::select(green_invest_2020, city_name),
-  tibble(inv_10y = inv_10y)
+  tibble(inv_10y = inv_10y, inv_5y = inv_5y, inv_latest = inv_latest)
 ) %>%
   left_join(green_2020, by = "city_name") %>%
-  mutate(pa_built_10y = inv_10y / area_built)
-
-# --- E2: 多年建成区绿地面积（green_area_data.xlsx，2011-2020均值）---
-ga_raw <- readxl::read_excel("data_raw/green_area_data.xlsx")
-ga_data <- ga_raw[4:nrow(ga_raw), ]
-
-built_idx  <- seq(3, ncol(ga_raw), by = 3)
-built_yrs  <- as.integer(str_extract(names(ga_raw)[built_idx], "^\\d{4}"))
-cols_ga_10y <- names(ga_raw)[built_idx[!is.na(built_yrs) &
-                                         built_yrs >= 2011 & built_yrs <= 2020]]
-cat(sprintf("\n绿地面积：2011-2020可用年份（%d年）: %s\n",
-            length(cols_ga_10y),
-            paste(str_extract(cols_ga_10y, "^\\d{4}"), collapse = " ")))
-
-ga_tbl <- ga_data %>%
-  rename(city_raw = 1) %>%
-  dplyr::select(city_raw, all_of(cols_ga_10y)) %>%
   mutate(
-    across(-city_raw, as.numeric),
-    green_built_10y = rowMeans(across(-city_raw), na.rm = TRUE),
-    city_name = paste0(enc2utf8(as.character(city_raw)), "市")
-  ) %>%
-  dplyr::select(city_name, green_built_10y)
+    pa_built_10y    = inv_10y    / area_built,
+    pa_built_5y     = inv_5y     / area_built,
+    pa_built_latest = inv_latest / area_built
+  )
 
-city_vars <- invest_tbl %>%
-  left_join(ga_tbl, by = "city_name")
-
-n_ga <- sum(!is.na(city_vars$green_built_10y))
-cat(sprintf("green_built_10y 匹配城市: %d / %d\n", n_ga, nrow(city_vars)))
+city_vars <- invest_tbl
 
 invest_station <- station_city_map %>%
   left_join(city_vars, by = "city_name")
 
-cat(sprintf("\npa_built_10y    非NA站点: %d\n",
-            sum(!is.na(invest_station$pa_built_10y))))
-cat(sprintf("green_built_10y 非NA站点: %d\n",
-            sum(!is.na(invest_station$green_built_10y))))
+cat(sprintf("\npa_built_10y    非NA站点: %d\n", sum(!is.na(invest_station$pa_built_10y))))
+cat(sprintf("pa_built_5y     非NA站点: %d\n", sum(!is.na(invest_station$pa_built_5y))))
+cat(sprintf("pa_built_latest 非NA站点: %d\n", sum(!is.na(invest_station$pa_built_latest))))
 
 
 # F. 合并分析数据框
@@ -431,22 +429,31 @@ anal_df <- trri_df %>%
   filter(!is.na(TRRI), !is.na(longitude), !is.na(latitude),
          !is.na(koppen_group)) %>%
   mutate(
-    koppen_B          = as.integer(koppen_group == "B"),
-    koppen_C          = as.integer(koppen_group == "C"),
-    koppen_D          = as.integer(koppen_group == "D"),
-    pa_built_10y_w    = winsorize(pa_built_10y),
-    green_built_10y_w = winsorize(green_built_10y)
+    koppen_B           = as.integer(koppen_group == "B"),
+    koppen_C           = as.integer(koppen_group == "C"),
+    koppen_D           = as.integer(koppen_group == "D"),
+    pa_built_10y_w     = winsorize(pa_built_10y),
+    pa_built_5y_w      = winsorize(pa_built_5y),
+    pa_built_latest_w  = winsorize(pa_built_latest)
   )
 
 cat(sprintf("\n站点总数（TRRI有效）: %d\n", nrow(anal_df)))
 cat(sprintf("pa_built_10y    非NA: %d\n", sum(!is.na(anal_df$pa_built_10y))))
-cat(sprintf("green_built_10y 非NA: %d\n", sum(!is.na(anal_df$green_built_10y))))
+cat(sprintf("pa_built_5y     非NA: %d\n", sum(!is.na(anal_df$pa_built_5y))))
+cat(sprintf("pa_built_latest 非NA: %d\n", sum(!is.na(anal_df$pa_built_latest))))
 cat("气候组分布:\n"); print(count(anal_df, koppen_group))
 
 
-# G. OLS 回归（两个绿地变量分别回归）
+# G. OLS 回归（3个投资变量分别单独入模）
 # -----------------------------------------------------------------------------
 geo_vars <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
+
+# 3个投资变量定义（原始变量名 + winsorize后变量名 + 标签）
+invest_vars <- list(
+  list(raw = "pa_built_10y",    w = "pa_built_10y_w",    label = "近10年均值（2011-2020）"),
+  list(raw = "pa_built_5y",     w = "pa_built_5y_w",     label = "近5年均值"),
+  list(raw = "pa_built_latest", w = "pa_built_latest_w", label = "最新一年")
+)
 
 run_ols_var <- function(df, var, label) {
   d <- df %>% filter(!is.na(.data[[var]]), .data[[var]] > 0)
@@ -463,83 +470,46 @@ run_ols_var <- function(df, var, label) {
   list(model=m, summary=s, coef=cr, sig=sig, n=nrow(d), var=var, label=label)
 }
 
-cat("\n=== G. OLS 回归（因变量：TRRI）===\n")
-ols_inv   <- run_ols_var(anal_df, "pa_built_10y_w",    "投资/绿地面积（pa_built_10y）")
-ols_green <- run_ols_var(anal_df, "green_built_10y_w", "建成区绿地面积（green_built_10y）")
+cat("\n=== G. OLS 回归（因变量：TRRI，3个投资变量分别入模）===\n")
+ols_list <- map(invest_vars, function(v)
+  run_ols_var(anal_df, v$w, v$label))
+names(ols_list) <- sapply(invest_vars, `[[`, "raw")
 
-d_both <- anal_df %>%
-  filter(!is.na(pa_built_10y), pa_built_10y > 0,
-         !is.na(green_built_10y), green_built_10y > 0)
-if (nrow(d_both) >= 20) {
-  m_both <- lm(TRRI ~ pa_built_10y_w + green_built_10y_w +
-                 longitude + latitude + koppen_B + koppen_C + koppen_D,
-               data = d_both)
-  cat("\n=== 两变量同时入模（n=", nrow(d_both), "）===\n")
-  print(summary(m_both))
-}
+# 取pa_built_10y作为后续代表性汇总变量
+ols_main <- ols_list[["pa_built_10y"]]
+s_ols    <- ols_main$summary
+cr_inv   <- ols_main$coef
+sig_inv  <- ols_main$sig
+main_var <- "pa_built_10y_w"
 
-s_ols   <- if (!is.null(ols_green)) ols_green$summary else ols_inv$summary
-cr_inv  <- if (!is.null(ols_green)) ols_green$coef    else ols_inv$coef
-sig_inv <- if (!is.null(ols_green)) ols_green$sig     else ols_inv$sig
-main_var <- if (!is.null(ols_green)) "green_built_10y_w" else "pa_built_10y_w"
-
-# 回归系数汇总表（含效应方向，保存为CSV供查阅）
-extract_coef_row <- function(ols_obj, var_label) {
-  if (is.null(ols_obj)) return(NULL)
-  cr <- ols_obj$coef
+# 回归系数汇总表
+coef_tbl <- map_dfr(invest_vars, function(v) {
+  obj <- ols_list[[v$raw]]
+  if (is.null(obj)) return(NULL)
+  cr <- obj$coef
   tibble(
-    variable    = ols_obj$var,
-    label       = var_label,
-    n           = ols_obj$n,
+    variable    = v$raw,
+    label       = v$label,
+    n           = obj$n,
     beta        = round(cr[1], 6),
     se          = round(cr[2], 6),
     t_val       = round(cr[3], 3),
     p_val       = round(cr[4], 4),
-    sig         = ols_obj$sig,
-    r2_adj_full = round(ols_obj$summary$adj.r.squared, 4),
+    sig         = obj$sig,
+    r2_adj_full = round(obj$summary$adj.r.squared, 4),
     direction   = ifelse(cr[1] > 0,
                          "↑ 投资增加→TRRI上升（韧性增强）",
                          "↓ 投资增加→TRRI下降（韧性减弱）")
   )
-}
+})
 
-coef_tbl <- bind_rows(
-  extract_coef_row(ols_inv,   "投资强度（pa_built_10y，单变量）"),
-  extract_coef_row(ols_green, "绿地存量（green_built_10y，单变量）")
-)
-
-# 双变量同时入模的系数
-if (nrow(d_both) >= 20 && exists("m_both")) {
-  s_both <- summary(m_both)
-  for (v in c("pa_built_10y_w", "green_built_10y_w")) {
-    if (v %in% rownames(s_both$coefficients)) {
-      cr2 <- s_both$coefficients[v, ]
-      coef_tbl <- bind_rows(coef_tbl, tibble(
-        variable    = v,
-        label       = paste0(sub("_w$", "", v), "（双变量同时入模）"),
-        n           = nrow(d_both),
-        beta        = round(cr2[1], 6),
-        se          = round(cr2[2], 6),
-        t_val       = round(cr2[3], 3),
-        p_val       = round(cr2[4], 4),
-        sig         = case_when(cr2[4]<0.001~"***", cr2[4]<0.01~"**",
-                                cr2[4]<0.05~"*",    cr2[4]<0.1~".", TRUE~"ns"),
-        r2_adj_full = round(s_both$adj.r.squared, 4),
-        direction   = ifelse(cr2[1] > 0,
-                             "↑ 投资增加→TRRI上升（韧性增强）",
-                             "↓ 投资增加→TRRI下降（韧性减弱）")
-      ))
-    }
-  }
-}
-
-cat("\n=== G. 回归系数汇总（投资对TRRI的效应方向）===\n")
+cat("\n=== G. 回归系数汇总（站点级，3个投资变量）===\n")
 print(coef_tbl %>% dplyr::select(label, n, beta, se, p_val, sig, direction, r2_adj_full))
 write_csv(coef_tbl, file.path(OUT, "ols_coef_invest.csv"))
 cat("-> ols_coef_invest.csv\n")
 
 
-# H. 方差分解（两个绿地变量分别 vs 地理）
+# H. 方差分解（3个投资变量分别 vs 地理）
 # -----------------------------------------------------------------------------
 run_varpart <- function(df, inv_var, label) {
   d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0)
@@ -561,25 +531,24 @@ run_varpart <- function(df, inv_var, label) {
          shared_R2 = round(fr$Adj.R.square[3]*100, 2))
 }
 
-cat("\n=== H. 方差分解（TRRI ~ 绿地变量 | 地理）===\n")
-vp_compare <- bind_rows(
-  run_varpart(anal_df, "pa_built_10y_w",    "投资/绿地面积（pa_built_10y）"),
-  run_varpart(anal_df, "green_built_10y_w", "建成区绿地面积（green_built_10y）")
-)
+cat("\n=== H. 方差分解（TRRI ~ 投资变量 | 地理，3个变量分别）===\n")
+vp_compare <- map_dfr(invest_vars, function(v)
+  run_varpart(anal_df, v$w, v$label))
 print(vp_compare)
-write_csv(vp_compare, file.path(OUT, "varpart_green_compare.csv"))
+write_csv(vp_compare, file.path(OUT, "varpart_invest_compare.csv"))
+cat("-> varpart_invest_compare.csv\n")
 
-# 主方差分解对象（供 L 段对比）
-d_main <- anal_df %>% filter(!is.na(green_built_10y_w), green_built_10y_w > 0)
+# 主方差分解对象取pa_built_10y（供 L 段站点级 vs 城市级对比）
+d_main <- anal_df %>% filter(!is.na(pa_built_10y_w), pa_built_10y_w > 0)
 vp_main <- tryCatch(
   vegan::varpart(d_main$TRRI,
-                 dplyr::select(d_main, green_built_10y_w),
+                 dplyr::select(d_main, pa_built_10y_w),
                  dplyr::select(d_main, all_of(geo_vars))),
   error = function(e) NULL)
 fr <- if (!is.null(vp_main)) vp_main$part$indfract else NULL
 
 vp_tbl <- if (!is.null(fr)) tibble(
-  component  = c("绿地存量（独立）", "地理（独立）", "共享部分", "未解释"),
+  component  = c("近10年均值（独立）", "地理（独立）", "共享部分", "未解释"),
   adj_R2_pct = round(fr$Adj.R.square * 100, 2)
 )
 cat("\n"); print(vp_tbl)
@@ -589,15 +558,12 @@ write_csv(vp_tbl, file.path(OUT, "varpart_05.csv"))
 # I. 图表 & 汇总输出
 # -----------------------------------------------------------------------------
 
-# 图1：散点图（两个绿地变量 vs TRRI，双面板）
-scatter_data <- bind_rows(
-  anal_df %>% filter(!is.na(pa_built_10y), pa_built_10y > 0) %>%
-    mutate(x_val = pa_built_10y_w,
-           panel = "投资强度（投资额/建成区绿地，pa_built_10y）"),
-  anal_df %>% filter(!is.na(green_built_10y), green_built_10y > 0) %>%
-    mutate(x_val = green_built_10y_w,
-           panel = "绿地存量（建成区绿地面积均值，green_built_10y，公顷）")
-)
+# 图1：散点图（3个投资变量 vs TRRI，三面板）
+scatter_data <- map_dfr(invest_vars, function(v) {
+  anal_df %>%
+    filter(!is.na(.data[[v$raw]]), .data[[v$raw]] > 0) %>%
+    mutate(x_val = .data[[v$w]], panel = v$label)
+})
 
 p_scatter <- ggplot(scatter_data,
                     aes(x = x_val, y = TRRI, color = koppen_group)) +
@@ -606,19 +572,19 @@ p_scatter <- ggplot(scatter_data,
               linetype = "dashed", linewidth = 0.9) +
   scale_color_brewer(palette = "Set1", name = "Köppen气候区") +
   scale_y_continuous(breaks = seq(1, TRRI_MAX, by = 2)) +
-  facet_wrap(~panel, scales = "free_x") +
+  facet_wrap(~panel, scales = "free_x", nrow = 1) +
   labs(
-    title    = "绿地变量与热响应韧性指数（TRRI）",
-    subtitle = "X=VPD均值（去趋势）；左=投资强度，右=绿地存量（99%分位截尾）",
+    title    = "单位面积投资（不同时间窗口）与热响应韧性指数（TRRI）",
+    subtitle = "X=VPD均值（去趋势）；三个时间窗口分别展示（99%分位截尾）",
     x = NULL, y = sprintf("TRRI（1–%d）", TRRI_MAX)
   ) +
   theme_cn()
 
-ggsave(file.path(OUT, "scatter_trri_green.png"),
-       p_scatter, width = 14, height = 7, dpi = 300)
-cat("-> scatter_trri_green.png\n")
+ggsave(file.path(OUT, "scatter_trri_invest.png"),
+       p_scatter, width = 18, height = 6, dpi = 300)
+cat("-> scatter_trri_invest.png\n")
 
-# 图2：方差分解对比条形图
+# 图2：方差分解对比条形图（3个投资变量并排）
 p_vp <- vp_compare %>%
   pivot_longer(c(invest_R2, geo_R2, shared_R2),
                names_to = "comp", values_to = "r2") %>%
@@ -626,26 +592,27 @@ p_vp <- vp_compare %>%
     r2_show    = pmax(r2, 0),
     comp_label = factor(comp,
                         levels = c("invest_R2", "shared_R2", "geo_R2"),
-                        labels = c("绿地变量", "共享", "地理"))
+                        labels = c("投资变量", "共享", "地理")),
+    label      = factor(label, levels = sapply(invest_vars, `[[`, "label"))
   ) %>%
   ggplot(aes(x = comp_label, y = r2_show, fill = comp_label)) +
   geom_col(width = 0.5, alpha = 0.85) +
   geom_text(aes(label = sprintf("%.2f%%", r2_show)),
             vjust = -0.4, size = 4.5, family = "heiti") +
   scale_fill_manual(
-    values = c("绿地变量" = "#D73027", "共享" = "#FDAE61", "地理" = "#4575B4"),
+    values = c("投资变量" = "#D73027", "共享" = "#FDAE61", "地理" = "#4575B4"),
     guide  = "none") +
   scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
-  facet_wrap(~label) +
+  facet_wrap(~label, nrow = 1) +
   labs(
-    title    = "方差分解：两个绿地变量 vs 地理的独立贡献对比",
+    title    = "方差分解：3个投资变量 vs 地理的独立贡献对比",
     subtitle = "X=VPD均值（去趋势）；地理 = 经纬度 + Köppen气候区哑变量",
     x = NULL, y = "调整R²（%）"
   ) +
   theme_cn()
 
 ggsave(file.path(OUT, "varpart_bar_05.png"),
-       p_vp, width = 8, height = 6, dpi = 300)
+       p_vp, width = 14, height = 6, dpi = 300)
 cat("-> varpart_bar_05.png\n")
 
 # 图3：S-map系数轨迹（4类站点均值±SE）
@@ -723,10 +690,10 @@ ggsave(file.path(OUT, "stype_dist.png"),
        p_stype, width = 9, height = 6, dpi = 300)
 cat("-> stype_dist.png\n")
 
-# 汇总CSV
+# 汇总CSV（以pa_built_10y为代表）
 result_summary <- tibble(
   x_var         = "vpd_mean_dt",
-  inv_var       = "green_built_10y",
+  inv_var       = "pa_built_10y（近10年均值，代表）",
   n_ccm         = length(unique(ccm_results$meteo_stat_id)),
   n_regression  = nrow(anal_df),
   beta          = cr_inv[1],
@@ -746,13 +713,13 @@ cat("\n", strrep("=", 60), "\n")
 cat("分析摘要（05版：X=vpd_mean_dt）\n")
 cat(strrep("=", 60), "\n\n")
 cat(sprintf("X变量      : vpd_mean_dt（周均VPD，去趋势）\n"))
-cat(sprintf("投资变量   : pa_built_10y + green_built_10y\n"))
+cat(sprintf("投资变量   : pa_built_10y / pa_built_5y / pa_built_latest（分别入模）\n"))
 cat(sprintf("TRRI量表   : 1..%d（N_TP=%d, tp=0..%d）\n",
             TRRI_MAX, N_TP, MAX_TP))
 cat(sprintf("CCM站点数  : %d\n", length(unique(ccm_results$meteo_stat_id))))
 cat(sprintf("回归站点数 : %d\n", nrow(anal_df)))
 if (!is.null(fr)) {
-  cat(sprintf("\n【方差分解】\n  绿地存量独立贡献 = %.2f%%\n  地理独立贡献     = %.2f%%\n  共享部分         = %.2f%%\n",
+  cat(sprintf("\n【方差分解（pa_built_10y）】\n  投资独立贡献 = %.2f%%\n  地理独立贡献 = %.2f%%\n  共享部分     = %.2f%%\n",
               fr$Adj.R.square[1] * 100,
               fr$Adj.R.square[2] * 100,
               fr$Adj.R.square[3] * 100))
@@ -863,29 +830,30 @@ if (nrow(vp_stype) > 0) {
 }
 
 
-# K. 分层方差分解 2：按气候区分层
+# K. 分层方差分解 2：按气候区分层（3个投资变量分别）
 # -----------------------------------------------------------------------------
 
 cat("\n=== K. 按气候区分层的方差分解 ===\n")
 
-run_vp_geo <- function(df, grp_label) {
+run_vp_geo <- function(df, inv_var, grp_label) {
   d <- df %>%
-    filter(!is.na(TRRI), !is.na(pa_built_10y),
+    filter(!is.na(TRRI), !is.na(.data[[inv_var]]),
            !is.na(longitude), !is.na(latitude),
-           pa_built_10y > 0)
+           .data[[inv_var]] > 0)
   if (nrow(d) < 15) {
-    cat(sprintf("    [%s 跳过] n=%d < 15\n", grp_label, nrow(d)))
+    cat(sprintf("    [%s/%s 跳过] n=%d < 15\n", inv_var, grp_label, nrow(d)))
     return(NULL)
   }
   vp <- tryCatch(
     vegan::varpart(d$TRRI,
-                   dplyr::select(d, pa_built_10y),
+                   dplyr::select(d, all_of(inv_var)),
                    dplyr::select(d, longitude, latitude)),
     error = function(e) { cat("    varpart error:", e$message, "\n"); NULL }
   )
   if (is.null(vp)) return(NULL)
   fr <- vp$part$indfract
   tibble(
+    inv_var      = inv_var,
     koppen_group = grp_label,
     n            = nrow(d),
     invest_R2    = round(fr$Adj.R.square[1] * 100, 2),
@@ -896,109 +864,123 @@ run_vp_geo <- function(df, grp_label) {
 }
 
 koppen_groups <- sort(unique(anal_df$koppen_group))
-vp_koppen <- map_dfr(koppen_groups, function(g) {
-  df_g <- filter(anal_df, koppen_group == g)
-  cat(sprintf("\n[%s] n=%d\n", g, nrow(df_g)))
-  run_vp_geo(df_g, g)
+
+# 3个变量分别跑
+vp_koppen_all3 <- map_dfr(invest_vars, function(v) {
+  cat(sprintf("\n--- %s ---\n", v$label))
+  bind_rows(
+    run_vp_geo(anal_df, v$raw, "ALL"),
+    map_dfr(koppen_groups, function(g) {
+      cat(sprintf("  [%s] n=%d\n", g, sum(anal_df$koppen_group == g)))
+      run_vp_geo(filter(anal_df, koppen_group == g), v$raw, g)
+    })
+  ) %>% mutate(inv_label = v$label)
 })
 
-vp_all_latlon <- run_vp_geo(anal_df, "ALL")
-vp_koppen_full <- bind_rows(
-  if (!is.null(vp_all_latlon)) mutate(vp_all_latlon, koppen_group = "ALL"),
-  vp_koppen
-)
+write_csv(vp_koppen_all3, file.path(OUT, "varpart_by_koppen_all3.csv"))
+cat("\n"); print(vp_koppen_all3 %>% dplyr::select(inv_label, koppen_group, n, invest_R2, geo_R2))
+cat("-> varpart_by_koppen_all3.csv\n")
+
+# 保留pa_built_10y单独的对象供K2/L使用
+vp_koppen_full <- vp_koppen_all3 %>% filter(inv_var == "pa_built_10y")
 
 write_csv(vp_koppen_full, file.path(OUT, "varpart_by_koppen.csv"))
-cat("\n"); print(vp_koppen_full)
+cat("-> varpart_by_koppen.csv（pa_built_10y）\n")
 
-if (nrow(vp_koppen_full) > 0) {
-  koppen_order <- intersect(c("ALL","A","B","C","D"), vp_koppen_full$koppen_group)
+if (nrow(vp_koppen_all3) > 0) {
+  koppen_order <- intersect(c("ALL","A","B","C","D"), vp_koppen_all3$koppen_group)
   koppen_name  <- c(ALL="全部", A="A(热带)", B="B(干旱)",
                     C="C(温带)", D="D(大陆)")
+  inv_label_levels <- sapply(invest_vars, `[[`, "label")
 
-  p_vp_koppen <- vp_koppen_full %>%
-    pivot_longer(c(invest_R2, geo_R2, shared_R2),
-                 names_to = "comp", values_to = "r2") %>%
+  # 图：各气候区×各投资变量的投资独立R²对比（面板=气候区，x=投资变量）
+  p_vp_koppen <- vp_koppen_all3 %>%
     mutate(
-      r2_show    = pmax(r2, 0),
-      comp_label = factor(comp,
-                          levels = c("invest_R2", "shared_R2", "geo_R2"),
-                          labels = c("投资", "共享", "地理")),
-      grp_label  = factor(
+      r2_show   = pmax(invest_R2, 0),
+      grp_label = factor(
         dplyr::recode(koppen_group, !!!koppen_name),
         levels = koppen_name[koppen_order]
-      )
+      ),
+      inv_label = factor(inv_label, levels = inv_label_levels)
     ) %>%
     filter(!is.na(grp_label)) %>%
-    ggplot(aes(x = comp_label, y = r2_show, fill = comp_label)) +
-    geom_col(width = 0.55, alpha = 0.85, position = "dodge") +
-    geom_text(aes(label = sprintf("%.1f%%", r2_show)),
+    ggplot(aes(x = inv_label, y = r2_show, fill = inv_label)) +
+    geom_col(width = 0.6, alpha = 0.85) +
+    geom_text(aes(label = sprintf("%.2f%%", invest_R2)),
               vjust = -0.4, size = 3.8, family = "heiti") +
     scale_fill_manual(
-      values = c("投资" = "#D73027", "共享" = "#FDAE61", "地理" = "#4575B4"),
-      name = "方差来源") +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+      values = c("#D73027", "#FC8D59", "#FEE090")[seq_along(inv_label_levels)],
+      name = "投资变量") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
     facet_wrap(~grp_label, nrow = 1) +
     labs(
-      title    = "分层方差分解：气候区分层",
+      title    = "气候区分层方差分解：3个投资变量投资独立解释力对比",
       subtitle = "X=VPD均值（去趋势）；因变量=TRRI；地理=经纬度（不含气候区哑变量）",
-      x = NULL, y = "调整R²（%）"
+      x = NULL, y = "投资独立调整R²（%）"
     ) +
     theme_cn() +
     theme(legend.position = "bottom",
-          axis.text.x = element_text(angle = 20, hjust = 1))
+          axis.text.x = element_text(angle = 25, hjust = 1))
 
   ggsave(file.path(OUT, "varpart_by_koppen.png"),
-         p_vp_koppen, width = 12, height = 6, dpi = 300)
+         p_vp_koppen, width = 14, height = 6, dpi = 300)
   cat("-> varpart_by_koppen.png\n")
 }
 
 
-# K2. 气候区分层：站点级 vs 城市级对比
+# K2. 气候区分层：站点级 vs 城市级对比（3个投资变量）
 # -----------------------------------------------------------------------------
 
 cat("\n=== K2. 气候区分层：站点级 vs 城市级对比 ===\n")
 
-# 城市级数据（L段会再次使用；此处先建供K2用）
+# 城市级数据（L段会再次使用）
 city_agg_k <- anal_df %>%
   group_by(city_name) %>%
   summarise(
-    TRRI_mean    = mean(TRRI,        na.rm = TRUE),
-    pa_built_10y = first(pa_built_10y),
-    longitude    = mean(longitude,   na.rm = TRUE),
-    latitude     = mean(latitude,    na.rm = TRUE),
-    koppen_group = first(koppen_group),
-    .groups      = "drop"
+    TRRI_mean       = mean(TRRI,      na.rm = TRUE),
+    pa_built_10y    = first(pa_built_10y),
+    pa_built_5y     = first(pa_built_5y),
+    pa_built_latest = first(pa_built_latest),
+    longitude       = mean(longitude, na.rm = TRUE),
+    latitude        = mean(latitude,  na.rm = TRUE),
+    koppen_group    = first(koppen_group),
+    .groups         = "drop"
   ) %>%
-  filter(!is.na(TRRI_mean), !is.na(pa_built_10y),
-         !is.na(longitude),  !is.na(latitude))
+  filter(!is.na(TRRI_mean), !is.na(longitude), !is.na(latitude))
 
-run_vp_city <- function(df, grp_label) {
-  d <- df %>% filter(!is.na(pa_built_10y), pa_built_10y > 0)
+run_vp_city_var <- function(df, inv_var, grp_label) {
+  d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0)
   if (nrow(d) < 15) return(NULL)
   vp <- tryCatch(
     vegan::varpart(d$TRRI_mean,
-                   dplyr::select(d, pa_built_10y),
+                   dplyr::select(d, all_of(inv_var)),
                    dplyr::select(d, longitude, latitude)),
     error = function(e) NULL)
   if (is.null(vp)) return(NULL)
   fr2 <- vp$part$indfract
-  tibble(koppen_group = grp_label, n = nrow(d),
+  tibble(inv_var = inv_var, koppen_group = grp_label, n = nrow(d),
          invest_R2 = round(fr2$Adj.R.square[1]*100, 2),
          geo_R2    = round(fr2$Adj.R.square[2]*100, 2),
          shared_R2 = round(fr2$Adj.R.square[3]*100, 2),
          unexplained = round(fr2$Adj.R.square[4]*100, 2))
 }
 
-vp_city_koppen_full <- bind_rows(
-  run_vp_city(city_agg_k, "ALL"),
-  map_dfr(sort(unique(city_agg_k$koppen_group)), ~run_vp_city(
-    filter(city_agg_k, koppen_group == .x), .x))
-)
+# 3个变量分别跑城市级气候区分层
+vp_city_koppen_all3 <- map_dfr(invest_vars, function(v) {
+  bind_rows(
+    run_vp_city_var(city_agg_k, v$raw, "ALL"),
+    map_dfr(sort(unique(city_agg_k$koppen_group)), ~run_vp_city_var(
+      filter(city_agg_k, koppen_group == .x), v$raw, .x))
+  ) %>% mutate(inv_label = v$label)
+})
 
-cat("\n城市级气候区方差分解：\n"); print(vp_city_koppen_full)
+cat("\n城市级气候区方差分解（3变量）：\n")
+print(vp_city_koppen_all3 %>% dplyr::select(inv_label, koppen_group, n, invest_R2, geo_R2))
 
-# 合并站点级与城市级，输出对比表
+# pa_built_10y城市级单独保留供L段
+vp_city_koppen_full <- vp_city_koppen_all3 %>% filter(inv_var == "pa_built_10y")
+
+# 合并站点级与城市级（以pa_built_10y为代表）
 koppen_compare <- bind_rows(
   vp_koppen_full %>%
     mutate(level = "站点级", data_n_label = paste0("n=", n, "站")),
@@ -1008,54 +990,55 @@ koppen_compare <- bind_rows(
   mutate(level = factor(level, levels = c("站点级", "城市级（聚合）")))
 
 write_csv(koppen_compare, file.path(OUT, "varpart_koppen_compare.csv"))
-cat("-> varpart_koppen_compare.csv\n")
-cat("\n站点级 vs 城市级气候区对比：\n")
+cat("-> varpart_koppen_compare.csv（pa_built_10y代表）\n")
+
+# 全3变量的站点级+城市级对比表
+koppen_compare_all3 <- bind_rows(
+  vp_koppen_all3 %>% mutate(level = "站点级"),
+  vp_city_koppen_all3 %>% mutate(level = "城市级（聚合）")
+) %>% mutate(level = factor(level, levels = c("站点级", "城市级（聚合）")))
+write_csv(koppen_compare_all3, file.path(OUT, "varpart_koppen_compare_all3.csv"))
+cat("-> varpart_koppen_compare_all3.csv（3变量完整对比）\n")
+
+cat("\n站点级 vs 城市级气候区对比（pa_built_10y）：\n")
 print(koppen_compare %>% dplyr::select(koppen_group, level, n, invest_R2, geo_R2, unexplained))
 
-# 对比图：每个气候区内并排站点级/城市级，仅展示投资和地理独立解释力
-if (nrow(koppen_compare) > 0) {
-  koppen_order2 <- intersect(c("ALL","A","B","C","D"), koppen_compare$koppen_group)
-  koppen_name2  <- c(ALL="全部", A="A(热带)", B="B(干旱)",
-                     C="C(温带)", D="D(大陆)")
+# 对比图：面板=气候区，x=投资变量，颜色=站点/城市级
+if (nrow(koppen_compare_all3) > 0) {
+  koppen_order2  <- intersect(c("ALL","A","B","C","D"), koppen_compare_all3$koppen_group)
+  koppen_name2   <- c(ALL="全部", A="A(热带)", B="B(干旱)", C="C(温带)", D="D(大陆)")
+  inv_label_levels <- sapply(invest_vars, `[[`, "label")
 
-  p_koppen_cmp <- koppen_compare %>%
-    pivot_longer(c(invest_R2, geo_R2),
-                 names_to = "comp", values_to = "r2") %>%
+  p_koppen_cmp <- koppen_compare_all3 %>%
     mutate(
-      r2_show    = pmax(r2, 0),
-      r2_label   = sprintf("%.2f%%", r2),   # 原始值含负数
-      comp_label = factor(comp,
-                          levels = c("invest_R2", "geo_R2"),
-                          labels = c("投资（独立）", "地理（独立）")),
-      grp_label  = factor(
-        dplyr::recode(koppen_group, !!!koppen_name2),
-        levels = koppen_name2[koppen_order2]
-      )
+      r2_show   = pmax(invest_R2, 0),
+      r2_label  = sprintf("%.2f%%", invest_R2),
+      grp_label = factor(dplyr::recode(koppen_group, !!!koppen_name2),
+                         levels = koppen_name2[koppen_order2]),
+      inv_label = factor(inv_label, levels = inv_label_levels)
     ) %>%
     filter(!is.na(grp_label)) %>%
-    ggplot(aes(x = level, y = r2_show, fill = comp_label)) +
-    geom_col(width = 0.6, alpha = 0.85,
-             position = position_dodge(width = 0.7)) +
+    ggplot(aes(x = inv_label, y = r2_show, fill = level)) +
+    geom_col(width = 0.65, alpha = 0.85, position = position_dodge(width = 0.75)) +
     geom_text(aes(label = r2_label),
-              position = position_dodge(width = 0.7),
-              vjust = -0.4, size = 3.5, family = "heiti") +
+              position = position_dodge(width = 0.75),
+              vjust = -0.4, size = 3.2, family = "heiti") +
     scale_fill_manual(
-      values = c("投资（独立）" = "#D73027", "地理（独立）" = "#4575B4"),
-      name = "方差来源") +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.25)),
-                       limits = c(0, NA)) +
+      values = c("站点级" = "#D73027", "城市级（聚合）" = "#4575B4"),
+      name = "分析层级") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.25)), limits = c(0, NA)) +
     facet_wrap(~grp_label, nrow = 1) +
     labs(
-      title    = "气候区分层方差分解：站点级 vs 城市级聚合",
-      subtitle = "X=VPD均值（去趋势）；投资=pa_built_10y；地理=经纬度；标注值含负数",
-      x = NULL, y = "调整R²（%）"
+      title    = "气候区分层方差分解：3个投资变量 × 站点级/城市级对比",
+      subtitle = "X=VPD均值（去趋势）；地理=经纬度；标注值含负数（显示为0）",
+      x = NULL, y = "投资独立调整R²（%）"
     ) +
     theme_cn() +
     theme(legend.position = "bottom",
-          axis.text.x = element_text(angle = 15, hjust = 1))
+          axis.text.x = element_text(angle = 25, hjust = 1))
 
   ggsave(file.path(OUT, "varpart_koppen_compare.png"),
-         p_koppen_cmp, width = 13, height = 6, dpi = 300)
+         p_koppen_cmp, width = 16, height = 6, dpi = 300)
   cat("-> varpart_koppen_compare.png\n")
 }
 
@@ -1072,8 +1055,9 @@ city_agg <- anal_df %>%
     TRRI_mean    = mean(TRRI,        na.rm = TRUE),
     TRRI_sd      = sd(TRRI,          na.rm = TRUE),
     TRRI_range   = max(TRRI) - min(TRRI),
-    pa_built_10y   = first(pa_built_10y),
-    green_built_10y = first(green_built_10y),
+    pa_built_10y    = first(pa_built_10y),
+    pa_built_5y     = first(pa_built_5y),
+    pa_built_latest = first(pa_built_latest),
     longitude    = mean(longitude,   na.rm = TRUE),
     latitude     = mean(latitude,    na.rm = TRUE),
     koppen_group = first(koppen_group),
@@ -1116,17 +1100,8 @@ run_ols_city <- function(df, inv_var, var_label) {
   )
 }
 
-ols_city_tbl <- bind_rows(
-  run_ols_city(city_agg, "pa_built_10y", "投资强度（pa_built_10y，城市级）")
-)
-
-# 若city_agg含green_built_10y则也加入
-if ("green_built_10y" %in% colnames(city_agg)) {
-  ols_city_tbl <- bind_rows(
-    ols_city_tbl,
-    run_ols_city(city_agg, "green_built_10y", "绿地存量（green_built_10y，城市级）")
-  )
-}
+ols_city_tbl <- map_dfr(invest_vars, function(v)
+  run_ols_city(city_agg, v$raw, paste0(v$label, "（城市级）")))
 
 cat("\n=== L. 城市级OLS回归系数 ===\n")
 print(ols_city_tbl %>% dplyr::select(label, n, beta, se, p_val, sig, direction, r2_adj_full))
@@ -1147,82 +1122,76 @@ if (file.exists(file.path(OUT, "ols_coef_invest.csv"))) {
 
 geo_vars_city <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
 
-vp_city <- vegan::varpart(
-  city_agg$TRRI_mean,
-  dplyr::select(city_agg, pa_built_10y),
-  dplyr::select(city_agg, all_of(geo_vars_city))
-)
+# 城市级varpart：3个变量分别跑
+run_vp_city_full <- function(df, inv_var, label) {
+  d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0, !is.na(TRRI_mean))
+  if (nrow(d) < 15) return(NULL)
+  vp <- tryCatch(
+    vegan::varpart(d$TRRI_mean,
+                   dplyr::select(d, all_of(inv_var)),
+                   dplyr::select(d, all_of(geo_vars_city))),
+    error = function(e) NULL)
+  if (is.null(vp)) return(NULL)
+  fr2 <- vp$part$indfract
+  tibble(level="城市级（聚合）", variable=inv_var, label=label, n=nrow(d),
+         invest_R2 = round(fr2$Adj.R.square[1]*100, 2),
+         geo_R2    = round(fr2$Adj.R.square[2]*100, 2),
+         shared_R2 = round(fr2$Adj.R.square[3]*100, 2),
+         unexplained = round(fr2$Adj.R.square[4]*100, 2))
+}
 
-fr_city <- vp_city$part$indfract
-vp_city_tbl <- tibble(
-  level      = "城市级（聚合）",
-  component  = c("投资（独立）", "地理（独立）", "共享部分", "未解释"),
-  adj_R2_pct = round(fr_city$Adj.R.square * 100, 2)
-)
-cat("\n"); print(vp_city_tbl)
+vp_city_all3 <- map_dfr(invest_vars, function(v)
+  run_vp_city_full(city_agg, v$raw, v$label))
+cat("\n城市级方差分解（3变量）：\n")
+print(vp_city_all3 %>% dplyr::select(label, n, invest_R2, geo_R2, shared_R2))
+
+# 站点级+城市级汇总对比（pa_built_10y为代表）
+vp_city_10y <- vp_city_all3 %>% filter(variable == "pa_built_10y")
+fr_city_10y <- vp_city_10y$invest_R2  # 仅作参考
 
 compare_tbl <- bind_rows(
-  tibble(level="站点级（原始）",
+  tibble(level="站点级（原始）", variable="pa_built_10y", label="近10年均值（2011-2020）",
          invest_R2 = if (!is.null(fr)) fr$Adj.R.square[1]*100 else NA,
          geo_R2    = if (!is.null(fr)) fr$Adj.R.square[2]*100 else NA,
          shared_R2 = if (!is.null(fr)) fr$Adj.R.square[3]*100 else NA,
          n         = nrow(anal_df)),
-  tibble(level="城市级（聚合）",
-         invest_R2 = fr_city$Adj.R.square[1]*100,
-         geo_R2    = fr_city$Adj.R.square[2]*100,
-         shared_R2 = fr_city$Adj.R.square[3]*100,
-         n         = nrow(city_agg))
+  vp_city_all3 %>% filter(variable == "pa_built_10y")
 ) %>% mutate(across(c(invest_R2, geo_R2, shared_R2), ~round(.x, 2)))
 
-cat("\n--- 站点级 vs 城市级对比 ---\n")
-print(compare_tbl)
-write_csv(compare_tbl, file.path(OUT, "varpart_city_vs_station.csv"))
+# 全3变量站点+城市合并
+compare_tbl_all3 <- bind_rows(
+  vp_compare %>% mutate(level = "站点级（原始）"),
+  vp_city_all3
+) %>% mutate(across(c(invest_R2, geo_R2, shared_R2), ~round(.x, 2)))
 
-# 城市级 × 气候区分层
-cat("\n--- 城市级 × 气候区分层 ---\n")
-vp_city_koppen <- map_dfr(sort(unique(city_agg$koppen_group)), function(g) {
-  d <- filter(city_agg, koppen_group == g)
-  cat(sprintf("  [%s] n=%d 城市\n", g, nrow(d)))
-  if (nrow(d) < 15) return(NULL)
-  vp <- tryCatch(
-    vegan::varpart(d$TRRI_mean,
-                   dplyr::select(d, pa_built_10y),
-                   dplyr::select(d, longitude, latitude)),
-    error = function(e) NULL)
-  if (is.null(vp)) return(NULL)
-  fr2 <- vp$part$indfract
-  tibble(koppen=g, n=nrow(d),
-         invest_R2 = round(fr2$Adj.R.square[1]*100, 2),
-         geo_R2    = round(fr2$Adj.R.square[2]*100, 2),
-         shared_R2 = round(fr2$Adj.R.square[3]*100, 2))
-})
-print(vp_city_koppen)
-write_csv(vp_city_koppen, file.path(OUT, "varpart_city_koppen.csv"))
+cat("\n--- 站点级 vs 城市级对比（3变量）---\n")
+print(compare_tbl_all3 %>% dplyr::select(level, label, n, invest_R2, geo_R2))
+write_csv(compare_tbl_all3, file.path(OUT, "varpart_city_vs_station.csv"))
+cat("-> varpart_city_vs_station.csv\n")
 
-# 城市级对比条形图
-p_compare <- compare_tbl %>%
-  pivot_longer(c(invest_R2, geo_R2, shared_R2),
-               names_to = "comp", values_to = "r2") %>%
+# 图：3变量 × 站点/城市级投资解释力对比
+p_compare <- compare_tbl_all3 %>%
   mutate(
-    r2_show    = pmax(r2, 0),
-    comp_label = factor(comp,
-                        levels = c("invest_R2","shared_R2","geo_R2"),
-                        labels = c("投资","共享","地理")),
-    level      = factor(level, levels = c("站点级（原始）","城市级（聚合）"))
+    r2_show   = pmax(invest_R2, 0),
+    r2_label  = sprintf("%.2f%%", invest_R2),
+    label     = factor(label, levels = sapply(invest_vars, `[[`, "label")),
+    level     = factor(level, levels = c("站点级（原始）", "城市级（聚合）"))
   ) %>%
-  ggplot(aes(x = comp_label, y = r2_show, fill = comp_label)) +
-  geom_col(width = 0.5, alpha = 0.85) +
-  geom_text(aes(label = sprintf("%.2f%%", r2_show)),
-            vjust = -0.4, size = 5, family = "heiti") +
+  ggplot(aes(x = label, y = r2_show, fill = level)) +
+  geom_col(width = 0.6, alpha = 0.85, position = position_dodge(width = 0.7)) +
+  geom_text(aes(label = r2_label),
+            position = position_dodge(width = 0.7),
+            vjust = -0.4, size = 4, family = "heiti") +
   scale_fill_manual(
-    values = c("投资"="#D73027","共享"="#FDAE61","地理"="#4575B4"),
-    guide  = "none") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
-  facet_wrap(~level) +
-  labs(title    = "方差分解：站点级 vs 城市级聚合",
+    values = c("站点级（原始）" = "#D73027", "城市级（聚合）" = "#4575B4"),
+    name = "分析层级") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
+  labs(title    = "方差分解：3个投资变量 × 站点级 vs 城市级",
        subtitle = "X=VPD均值（去趋势）；消除城市内伪重复后投资解释力的变化",
-       x = NULL, y = "调整R²（%）") +
-  theme_cn()
+       x = NULL, y = "投资独立调整R²（%）") +
+  theme_cn() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 15, hjust = 1))
 
 ggsave(file.path(OUT, "varpart_city_compare.png"),
        p_compare, width = 10, height = 6, dpi = 300)
