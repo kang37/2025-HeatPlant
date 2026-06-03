@@ -1072,7 +1072,8 @@ city_agg <- anal_df %>%
     TRRI_mean    = mean(TRRI,        na.rm = TRUE),
     TRRI_sd      = sd(TRRI,          na.rm = TRUE),
     TRRI_range   = max(TRRI) - min(TRRI),
-    pa_built_10y = first(pa_built_10y),
+    pa_built_10y   = first(pa_built_10y),
+    green_built_10y = first(green_built_10y),
     longitude    = mean(longitude,   na.rm = TRUE),
     latitude     = mean(latitude,    na.rm = TRUE),
     koppen_group = first(koppen_group),
@@ -1086,6 +1087,63 @@ city_agg <- anal_df %>%
 
 cat(sprintf("城市数: %d（站点数中位数: %.0f）\n",
             nrow(city_agg), median(city_agg$n_stations)))
+
+# --- 城市级 OLS 回归系数（投资对TRRI均值的效应）---
+run_ols_city <- function(df, inv_var, var_label) {
+  d <- df %>% filter(!is.na(.data[[inv_var]]), .data[[inv_var]] > 0,
+                     !is.na(TRRI_mean))
+  if (nrow(d) < 10) return(NULL)
+  d$inv_w <- as.numeric(scale(d[[inv_var]]))
+  m <- lm(TRRI_mean ~ inv_w + longitude + latitude + koppen_B + koppen_C + koppen_D, data = d)
+  s <- summary(m)
+  cr <- s$coefficients["inv_w", ]
+  sig <- case_when(cr[4]<0.001~"***", cr[4]<0.01~"**", cr[4]<0.05~"*",
+                   cr[4]<0.1~".", TRUE~"ns")
+  tibble(
+    level       = "城市级（聚合）",
+    variable    = inv_var,
+    label       = var_label,
+    n           = nrow(d),
+    beta        = round(cr[1], 6),
+    se          = round(cr[2], 6),
+    t_val       = round(cr[3], 3),
+    p_val       = round(cr[4], 4),
+    sig         = sig,
+    r2_adj_full = round(s$adj.r.squared, 4),
+    direction   = ifelse(cr[1] > 0,
+                         "↑ 投资增加→TRRI上升（韧性增强）",
+                         "↓ 投资增加→TRRI下降（韧性减弱）")
+  )
+}
+
+ols_city_tbl <- bind_rows(
+  run_ols_city(city_agg, "pa_built_10y", "投资强度（pa_built_10y，城市级）")
+)
+
+# 若city_agg含green_built_10y则也加入
+if ("green_built_10y" %in% colnames(city_agg)) {
+  ols_city_tbl <- bind_rows(
+    ols_city_tbl,
+    run_ols_city(city_agg, "green_built_10y", "绿地存量（green_built_10y，城市级）")
+  )
+}
+
+cat("\n=== L. 城市级OLS回归系数 ===\n")
+print(ols_city_tbl %>% dplyr::select(label, n, beta, se, p_val, sig, direction, r2_adj_full))
+write_csv(ols_city_tbl, file.path(OUT, "ols_coef_invest_city.csv"))
+cat("-> ols_coef_invest_city.csv\n")
+
+# 与站点级系数合并输出一张对比表
+if (file.exists(file.path(OUT, "ols_coef_invest.csv"))) {
+  station_coef <- read_csv(file.path(OUT, "ols_coef_invest.csv"), show_col_types = FALSE) %>%
+    mutate(level = "站点级")
+  ols_compare <- bind_rows(station_coef, ols_city_tbl) %>%
+    dplyr::select(level, label, n, beta, se, p_val, sig, direction, r2_adj_full)
+  write_csv(ols_compare, file.path(OUT, "ols_coef_invest_compare.csv"))
+  cat("-> ols_coef_invest_compare.csv（站点级+城市级对比）\n")
+  cat("\n=== 站点级 vs 城市级 OLS系数对比 ===\n")
+  print(ols_compare)
+}
 
 geo_vars_city <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
 
