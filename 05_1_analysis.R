@@ -321,7 +321,7 @@ map_df <- trri_df %>%
 stype_colors_cn <- setNames(stype_colors, stype_labels)
 
 # Köppen色系：绿/橙/蓝/紫（暖色系，区别于CCM的红蓝系）
-koppen_colors_map <- c(A = "#1B9E77", B = "#D95F02", C = "#7570B3", D = "#E7298A")
+koppen_colors_map <- c(A = "#5A8F76", B = "#EAD5A0", C = "#A3B86C", D = "#C2DFCD")
 koppen_labels_map <- c(A = "A 热带/亚热带", B = "B 干旱", C = "C 温带", D = "D 大陆")
 
 # --- 主地图 ---
