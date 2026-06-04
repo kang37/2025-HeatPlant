@@ -20,7 +20,7 @@
 pacman::p_load(
   dplyr, tidyr, purrr, ggplot2, stringr, readr,
   vegan, tibble, scales, showtext, sysfonts,
-  targets, MASS, nnet, ggnewscale, patchwork,
+  targets, MASS, nnet, ggnewscale, patchwork, ggforce,
   terra, sf, rnaturalearth, rnaturalearthdata
 )
 
@@ -464,6 +464,153 @@ p_lat_prop <- ggplot(lat_prop,
 ggsave(file.path(OUT, "ccm_prop_by_lat.png"),
        p_lat_prop, width = 9, height = 10, dpi = 300)
 cat("-> ccm_prop_by_lat.png\n")
+
+# 图3b：纬度 × 总数（条形）+ 各CCM比例（条形右侧饼图）
+{
+  # 每个纬度bin的总数和行位置（按纬度升序编号）
+  bins_sorted <- sort(unique(lat_prop$bin))
+  lat_total <- lat_prop %>%
+    group_by(bin) %>%
+    summarise(total = first(total), .groups = "drop") %>%
+    arrange(bin) %>%
+    mutate(y_pos = row_number())
+
+  lat_prop_p <- lat_prop %>%
+    left_join(dplyr::select(lat_total, bin, y_pos, total), by = c("bin","total"))
+
+  n_bins  <- nrow(lat_total)
+  max_n   <- max(lat_total$total)
+
+  # 条形压短：BAR_MAX 控制最大宽度，PIE_X 控制饼图圆心位置
+  BAR_MAX <- 3.5      # 条形最大宽度（缩放坐标，压短）
+  PIE_X   <- 5.2      # 饼图圆心x坐标
+  PIE_R   <- 0.40     # 饼图半径（y单位=1对应1个bin间距）
+  BAR_H   <- 0.28     # 条形半高
+
+  lat_total_s <- lat_total %>%
+    mutate(x_scaled = total / max_n * BAR_MAX)
+  lat_prop_s  <- lat_prop_p %>%
+    mutate(x_scaled = total / max_n * BAR_MAX)
+
+  y_labels <- paste0(bins_sorted - 1, "°–", bins_sorted + 1, "°N")
+
+  p_lat_pie <- ggplot() +
+    geom_rect(data = lat_total_s,
+              aes(xmin = 0, xmax = x_scaled,
+                  ymin = y_pos - BAR_H, ymax = y_pos + BAR_H),
+              fill = "grey75", color = "grey55", linewidth = 0.3, alpha = 0.85) +
+    geom_text(data = lat_total_s,
+              aes(x = x_scaled + 0.05, y = y_pos, label = total),
+              hjust = 0, size = 3, color = "grey30", family = "heiti") +
+    ggforce::geom_arc_bar(
+      data = lat_prop_s,
+      aes(x0 = PIE_X, y0 = y_pos, r0 = 0, r = PIE_R,
+          amount = n, fill = stype_label),
+      stat = "pie", color = "white", linewidth = 0.35
+    ) +
+    scale_fill_manual(values = stype_colors_point, name = "CCM响应类型") +
+    scale_y_continuous(breaks = lat_total_s$y_pos, labels = y_labels,
+                       expand = c(0.02, 0.02)) +
+    scale_x_continuous(
+      breaks = c(0, BAR_MAX/2, BAR_MAX),
+      labels = c(0, round(max_n/2), max_n),
+      limits = c(0, PIE_X + PIE_R + 0.4),
+      expand = c(0, 0)
+    ) +
+    annotate("text", x = PIE_X, y = n_bins + 0.75,
+             label = "CCM占比", size = 3.5, family = "heiti",
+             color = "grey30", hjust = 0.5) +
+    annotate("segment",
+             x = PIE_X - PIE_R - 0.05, xend = PIE_X + PIE_R + 0.05,
+             y = n_bins + 0.48, yend = n_bins + 0.48,
+             color = "grey60", linewidth = 0.4) +
+    coord_fixed() +
+    labs(title    = "不同纬度区间各类CCM响应类型（条形=站点总数，饼图=各类占比）",
+         subtitle = sprintf("每2°纬度一组；共%d站", n_lat_total),
+         x = "站点数", y = "纬度区间") +
+    theme_prop +
+    theme(legend.position = "right", panel.grid.major.y = element_blank())
+
+  ggsave(file.path(OUT, "ccm_prop_by_lat_pie.png"),
+         p_lat_pie, width = 9, height = 10, dpi = 300)
+  cat("-> ccm_prop_by_lat_pie.png\n")
+}
+
+# 图2b：经度区间 × 总数（竖向条形）+ 各CCM比例（条形上方饼图）
+{
+  bins_sorted_lon <- sort(unique(lon_prop$bin))
+  lon_total <- lon_prop %>%
+    group_by(bin) %>%
+    summarise(total = first(total), .groups = "drop") %>%
+    arrange(bin) %>%
+    mutate(x_pos = row_number())
+
+  lon_prop_p <- lon_prop %>%
+    left_join(dplyr::select(lon_total, bin, x_pos, total), by = c("bin","total"))
+
+  n_bins_lon <- nrow(lon_total)
+  max_n_lon  <- max(lon_total$total)
+
+  # 竖向：条形高度 = 站点数缩放；饼图在条形上方
+  BAR_MAX_Y <- 3.5     # 条形最大高度（缩放坐标）
+  PIE_Y     <- 5.2     # 饼图圆心y坐标
+  PIE_R_L   <- 0.40    # 饼图半径（x单位=1对应1个bin间距）
+  BAR_W     <- 0.28    # 条形半宽
+
+  lon_total_s <- lon_total %>%
+    mutate(y_scaled = total / max_n_lon * BAR_MAX_Y)
+  lon_prop_s  <- lon_prop_p %>%
+    mutate(y_scaled = total / max_n_lon * BAR_MAX_Y)
+
+  x_labels_lon <- paste0(bins_sorted_lon - 1.5, "°–",
+                          bins_sorted_lon + 1.5, "°E")
+
+  p_lon_pie <- ggplot() +
+    # 竖向条形
+    geom_rect(data = lon_total_s,
+              aes(xmin = x_pos - BAR_W, xmax = x_pos + BAR_W,
+                  ymin = 0, ymax = y_scaled),
+              fill = "grey75", color = "grey55", linewidth = 0.3, alpha = 0.85) +
+    # 条形顶端标注总数
+    geom_text(data = lon_total_s,
+              aes(x = x_pos, y = y_scaled + 0.08, label = total),
+              vjust = 0, size = 2.8, color = "grey30", family = "heiti") +
+    # 饼图（条形上方）
+    ggforce::geom_arc_bar(
+      data = lon_prop_s,
+      aes(x0 = x_pos, y0 = PIE_Y, r0 = 0, r = PIE_R_L,
+          amount = n, fill = stype_label),
+      stat = "pie", color = "white", linewidth = 0.35
+    ) +
+    scale_fill_manual(values = stype_colors_point, name = "CCM响应类型") +
+    scale_x_continuous(breaks = lon_total_s$x_pos, labels = x_labels_lon,
+                       expand = c(0.02, 0.02)) +
+    scale_y_continuous(
+      breaks = c(0, BAR_MAX_Y/2, BAR_MAX_Y),
+      labels = c(0, round(max_n_lon/2), max_n_lon),
+      limits = c(-0.1, PIE_Y + PIE_R_L + 0.5),
+      expand = c(0, 0)
+    ) +
+    annotate("text", x = n_bins_lon + 0.7, y = PIE_Y,
+             label = "CCM\n占比", size = 3.2, family = "heiti",
+             color = "grey30", hjust = 0, vjust = 0.5) +
+    annotate("segment",
+             x = n_bins_lon + 0.4, xend = n_bins_lon + 0.4,
+             y = PIE_Y - PIE_R_L - 0.05, yend = PIE_Y + PIE_R_L + 0.05,
+             color = "grey60", linewidth = 0.4) +
+    coord_fixed() +
+    labs(title    = "不同经度区间各类CCM响应类型（条形=站点总数，饼图=各类占比）",
+         subtitle = sprintf("每3°经度一组；共%d站", n_lon_total),
+         x = "经度区间", y = "站点数") +
+    theme_prop +
+    theme(legend.position  = "right",
+          panel.grid.major.x = element_blank(),
+          axis.text.x = element_text(angle = 40, hjust = 1))
+
+  ggsave(file.path(OUT, "ccm_prop_by_lon_pie.png"),
+         p_lon_pie, width = 22, height = 7, dpi = 300)
+  cat("-> ccm_prop_by_lon_pie.png\n")
+}
 
 # ---------- G2. 热图：站点 × time lag，按stype+气候区 ----------
 
