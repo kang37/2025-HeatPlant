@@ -20,7 +20,7 @@
 pacman::p_load(
   dplyr, tidyr, purrr, ggplot2, stringr, readr,
   vegan, tibble, scales, showtext, sysfonts,
-  targets, MASS, nnet, ggnewscale,
+  targets, MASS, nnet, ggnewscale, patchwork,
   terra, sf, rnaturalearth, rnaturalearthdata
 )
 
@@ -267,21 +267,11 @@ city_agg <- anal_df %>%
 
 cat("\n=== G. 可视化 ===\n")
 
-# ---------- G1. 中国地图：Köppen底色 + 站点CCM类型 ----------
+# ---------- G1. 中国地图：Köppen底色（仅中国境内）+ 站点CCM类型 + 边际密度 ----------
 
-# 读取Köppen栅格（0.5度分辨率，覆盖中国范围）
-koppen_tif <- "data_raw/koppen_geiger_tif/1991_2020/koppen_geiger_0p5.tif"
-china_prov  <- tryCatch(ne_states(country = "China", returnclass = "sf"),
-                        error = function(e) NULL)
+koppen_tif  <- "data_raw/koppen_geiger_tif/1991_2020/koppen_geiger_0p5.tif"
 china_bbox  <- c(xmin = 72, xmax = 136, ymin = 17, ymax = 54)
 
-koppen_rast <- tryCatch({
-  r <- terra::rast(koppen_tif)
-  terra::crop(r, terra::ext(china_bbox))
-}, error = function(e) { cat("  [Köppen raster读取失败]\n"); NULL })
-
-# Köppen编码 → A/B/C/D大类（根据legend.txt：1-5=A, 6-16=B, 17-28=C, 29-30=D, 其余=D或特殊）
-# 实际编码：A=1-4, B=5-9, C=10-17, D=18-28, E=29-30
 koppen_to_group <- function(x) {
   case_when(
     x >= 1  & x <= 4  ~ "A",
@@ -292,73 +282,188 @@ koppen_to_group <- function(x) {
   )
 }
 
-if (!is.null(koppen_rast) && !is.null(china_prov)) {
-  # 栅格转 data.frame
-  koppen_df <- terra::as.data.frame(koppen_rast, xy = TRUE) %>%
+# --- 底图矢量 ---
+world_land  <- tryCatch(ne_countries(scale = "medium", returnclass = "sf"),
+                        error = function(e) NULL)
+china_sf    <- tryCatch(
+  ne_countries(country = c("China","Hong Kong S.A.R.","Macao S.A.R.",
+                            "Taiwan"), scale = "medium", returnclass = "sf") %>%
+    st_union(),
+  error = function(e) NULL)
+china_prov  <- tryCatch(ne_states(country = "China", returnclass = "sf"),
+                        error = function(e) NULL)
+
+# --- Köppen 栅格：仅保留中国境内像元 ---
+koppen_rast <- tryCatch({
+  r <- terra::rast(koppen_tif)
+  terra::crop(r, terra::ext(china_bbox))
+}, error = function(e) { cat("  [Köppen raster读取失败]\n"); NULL })
+
+koppen_df_china <- NULL
+if (!is.null(koppen_rast) && !is.null(china_sf)) {
+  # 用中国边界 mask 栅格
+  china_vect <- tryCatch(terra::vect(china_sf), error = function(e) NULL)
+  if (!is.null(china_vect)) {
+    kr_masked <- tryCatch(terra::mask(koppen_rast, china_vect),
+                          error = function(e) koppen_rast)  # 退回无mask版
+  } else {
+    kr_masked <- koppen_rast
+  }
+  koppen_df_china <- terra::as.data.frame(kr_masked, xy = TRUE) %>%
     rename(koppen_code = 3) %>%
     mutate(koppen_grp = koppen_to_group(koppen_code)) %>%
-    filter(!is.na(koppen_grp),
-           x >= china_bbox["xmin"], x <= china_bbox["xmax"],
-           y >= china_bbox["ymin"], y <= china_bbox["ymax"])
-
-  map_df <- trri_df %>%
-    mutate(stype_label = factor(stype, levels = stype_levels, labels = stype_labels))
-
-  stype_colors_cn <- setNames(stype_colors, stype_labels)
-
-  p_map <- ggplot() +
-    # Köppen底色
-    geom_raster(data = koppen_df,
-                aes(x = x, y = y, fill = koppen_grp),
-                alpha = 0.45) +
-    scale_fill_manual(
-      values = koppen_colors,
-      labels = koppen_labels,
-      name   = "Köppen气候区",
-      na.value = "grey90"
-    ) +
-    # 省界
-    geom_sf(data = china_prov, fill = NA, color = "grey50",
-            linewidth = 0.25, inherit.aes = FALSE) +
-    # 站点
-    ggnewscale::new_scale_color() +
-    geom_point(data = map_df,
-               aes(x = longitude, y = latitude, color = stype_label),
-               size = 1.6, alpha = 0.9, shape = 16) +
-    scale_color_manual(
-      values = stype_colors_cn,
-      name   = "CCM响应类型"
-    ) +
-    coord_sf(xlim = c(72, 136), ylim = c(17, 54), expand = FALSE) +
-    labs(
-      title    = "城市植被热响应类型（CCM）与Köppen气候区",
-      subtitle = sprintf("X=VPD均值（去趋势）；tp=0..%d；共%d站", MAX_TP, nrow(map_df)),
-      x = NULL, y = NULL
-    ) +
-    theme_cn() +
-    theme(legend.position  = "right",
-          panel.grid.major = element_line(color = "grey85", linewidth = 0.3),
-          panel.background = element_rect(fill = "aliceblue", color = NA))
-
-  ggsave(file.path(OUT, "map_stype_koppen.png"),
-         p_map, width = 14, height = 9, dpi = 300)
-  cat("-> map_stype_koppen.png\n")
-
-} else {
-  # 降级：无底色版
-  cat("  [降级：无Köppen底色，仅站点图]\n")
-  map_df <- trri_df %>%
-    mutate(stype_label = factor(stype, levels = stype_levels, labels = stype_labels))
-  p_map <- ggplot(map_df, aes(x = longitude, y = latitude, color = stype_label)) +
-    geom_point(size = 1.8, alpha = 0.85) +
-    scale_color_manual(values = setNames(stype_colors, stype_labels), name = "响应类型") +
-    coord_cartesian(xlim = c(72, 136), ylim = c(17, 54)) +
-    labs(title = "站点CCM响应类型分布", x = NULL, y = NULL) +
-    theme_cn()
-  ggsave(file.path(OUT, "map_stype_koppen.png"),
-         p_map, width = 14, height = 9, dpi = 300)
-  cat("-> map_stype_koppen.png\n")
+    filter(!is.na(koppen_grp))
 }
+
+map_df <- trri_df %>%
+  mutate(stype_label = factor(stype, levels = stype_levels, labels = stype_labels))
+
+stype_colors_cn <- setNames(stype_colors, stype_labels)
+
+# Köppen色系：绿/橙/蓝/紫（暖色系，区别于CCM的红蓝系）
+koppen_colors_map <- c(A = "#1B9E77", B = "#D95F02", C = "#7570B3", D = "#E7298A")
+koppen_labels_map <- c(A = "A 热带/亚热带", B = "B 干旱", C = "C 温带", D = "D 大陆")
+
+# --- 主地图 ---
+theme_map <- theme_minimal(base_size = 13) +
+  theme(
+    text             = element_text(family = "heiti"),
+    panel.background = element_rect(fill = "#D6EAF8", color = NA),  # 海洋浅蓝
+    panel.grid.major = element_line(color = "white", linewidth = 0.3),
+    axis.text        = element_text(size = 10),
+    legend.position  = "right",
+    legend.key.size  = unit(0.5, "cm"),
+    legend.text      = element_text(size = 10),
+    legend.title     = element_text(size = 11, face = "bold"),
+    plot.title       = element_text(face = "bold", hjust = 0.5, size = 14,
+                                    family = "heiti"),
+    plot.subtitle    = element_text(hjust = 0.5, color = "grey40", size = 11,
+                                    family = "heiti")
+  )
+
+p_map_main <- ggplot()
+
+# 世界陆地（浅灰）
+if (!is.null(world_land))
+  p_map_main <- p_map_main +
+    geom_sf(data = world_land, fill = "grey88", color = "grey75",
+            linewidth = 0.15, inherit.aes = FALSE)
+
+# 中国境内 Köppen 底色
+if (!is.null(koppen_df_china))
+  p_map_main <- p_map_main +
+    geom_raster(data = koppen_df_china,
+                aes(x = x, y = y, fill = koppen_grp), alpha = 0.65) +
+    scale_fill_manual(values = koppen_colors_map, labels = koppen_labels_map,
+                      name = "Köppen气候区", na.value = "grey88")
+
+# 省界
+if (!is.null(china_prov))
+  p_map_main <- p_map_main +
+    geom_sf(data = china_prov, fill = NA, color = "grey55",
+            linewidth = 0.2, inherit.aes = FALSE)
+
+# 站点（CCM类型：红橙黄绿蓝系与Köppen色系区分）
+stype_colors_point <- c(
+  "全程抑制"  = "#1A6FBF",   # 深蓝
+  "抑制→促进" = "#74C6E8",   # 浅蓝
+  "促进→抑制" = "#F4A261",   # 橙
+  "全程促进"  = "#C1121F"    # 深红
+)
+
+p_map_main <- p_map_main +
+  ggnewscale::new_scale_color() +
+  geom_point(data = map_df,
+             aes(x = longitude, y = latitude, color = stype_label),
+             size = 1.8, alpha = 0.88, shape = 16) +
+  scale_color_manual(values = stype_colors_point, name = "CCM响应类型") +
+  coord_sf(xlim = c(72, 136), ylim = c(17, 54), expand = FALSE) +
+  labs(title    = "城市植被热响应类型（CCM）与Köppen气候区",
+       subtitle = sprintf("X=VPD均值（去趋势）；tp=0..%d；共%d站", MAX_TP, nrow(map_df)),
+       x = "经度", y = "纬度") +
+  theme_map
+
+# --- 保存主地图 ---
+ggsave(file.path(OUT, "map_stype_koppen.png"),
+       p_map_main, width = 14, height = 9, dpi = 300)
+cat("-> map_stype_koppen.png\n")
+
+# --- 经纬度 × CCM类型占比图（独立输出）---
+make_prop_df <- function(data, coord_col, bin_size, min_n = 3) {
+  data %>%
+    filter(!is.na(.data[[coord_col]]), !is.na(stype_label)) %>%
+    mutate(bin = floor(.data[[coord_col]] / bin_size) * bin_size + bin_size / 2) %>%
+    group_by(bin, stype_label) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(bin) %>%
+    mutate(pct = n / sum(n), total = sum(n)) %>%
+    ungroup() %>%
+    filter(total >= min_n)
+}
+
+lon_prop <- make_prop_df(map_df, "longitude", 3)
+lat_prop <- make_prop_df(map_df, "latitude",  2)
+
+theme_prop <- theme_minimal(base_size = 13) +
+  theme(text            = element_text(family = "heiti"),
+        panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
+        panel.grid.minor = element_blank(),
+        axis.text        = element_text(size = 11),
+        axis.title       = element_text(size = 12),
+        legend.text      = element_text(size = 11, family = "heiti"),
+        legend.title     = element_text(size = 12, face = "bold", family = "heiti"),
+        plot.title       = element_text(face = "bold", hjust = 0.5, size = 14,
+                                        family = "heiti"),
+        plot.subtitle    = element_text(hjust = 0.5, color = "grey40", size = 11,
+                                        family = "heiti"))
+
+# 图2：经度区间 × CCM占比（横轴=经度，纵轴=占比，堆叠条形）
+n_lon_total <- n_distinct(map_df$meteo_stat_id[!is.na(map_df$longitude)])
+p_lon_prop <- ggplot(lon_prop,
+                     aes(x = factor(bin), y = pct, fill = stype_label)) +
+  geom_col(position = "stack", alpha = 0.88, width = 0.85) +
+  geom_text(data = lon_prop %>% group_by(bin) %>% slice(1),
+            aes(x = factor(bin), y = 1.03, label = paste0("n=", total)),
+            inherit.aes = FALSE, size = 3, color = "grey40", family = "heiti") +
+  scale_fill_manual(values = stype_colors_point, name = "CCM响应类型") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1.08), expand = c(0, 0)) +
+  scale_x_discrete(labels = function(x)
+    paste0(as.numeric(x) - 1.5, "°–", as.numeric(x) + 1.5, "°E")) +
+  labs(title    = "不同经度区间各类CCM响应类型的站点占比",
+       subtitle = sprintf("每3°经度一组；共%d站；n=各组站点数", n_lon_total),
+       x = "经度区间", y = "占比") +
+  theme_prop +
+  theme(axis.text.x     = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+
+ggsave(file.path(OUT, "ccm_prop_by_lon.png"),
+       p_lon_prop, width = 13, height = 6, dpi = 300)
+cat("-> ccm_prop_by_lon.png\n")
+
+# 图3：纬度区间 × CCM占比（纵轴=纬度，横轴=占比，水平堆叠条形）
+n_lat_total <- n_distinct(map_df$meteo_stat_id[!is.na(map_df$latitude)])
+p_lat_prop <- ggplot(lat_prop,
+                     aes(y = factor(bin), x = pct, fill = stype_label)) +
+  geom_col(position = "stack", alpha = 0.88, width = 0.85) +
+  geom_text(data = lat_prop %>% group_by(bin) %>% slice(1),
+            aes(y = factor(bin), x = 1.03, label = paste0("n=", total)),
+            inherit.aes = FALSE, size = 3, color = "grey40", family = "heiti",
+            hjust = 0) +
+  scale_fill_manual(values = stype_colors_point, name = "CCM响应类型") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1.12), expand = c(0, 0)) +
+  scale_y_discrete(labels = function(x)
+    paste0(as.numeric(x) - 1, "°–", as.numeric(x) + 1, "°N")) +
+  labs(title    = "不同纬度区间各类CCM响应类型的站点占比",
+       subtitle = sprintf("每2°纬度一组；共%d站；n=各组站点数", n_lat_total),
+       y = "纬度区间", x = "占比（累加至100%）") +
+  theme_prop +
+  theme(legend.position = "right")
+
+ggsave(file.path(OUT, "ccm_prop_by_lat.png"),
+       p_lat_prop, width = 9, height = 10, dpi = 300)
+cat("-> ccm_prop_by_lat.png\n")
 
 # ---------- G2. 热图：站点 × time lag，按stype+气候区 ----------
 
@@ -512,7 +617,7 @@ run_olr_full <- function(df, inv_var, ctrl_vars, grp_label) {
     cat(sprintf("  [跳过 %s] n=%d\n", grp_label, nrow(d)))
     return(NULL)
   }
-  d$inv_w  <- as.numeric(scale(d[[inv_var]]))
+  d$inv_w  <- d[[inv_var]]   # 仅截尾，不标准化
   d$Y_ord  <- factor(d$TRRI, levels = sort(unique(d$TRRI)), ordered = TRUE)
   ctrl_use <- ctrl_vars[ctrl_vars %in% names(d)]
   ctrl_use <- ctrl_use[sapply(ctrl_use, function(v) var(d[[v]], na.rm = TRUE) > 0)]
@@ -547,7 +652,7 @@ run_olr_full <- function(df, inv_var, ctrl_vars, grp_label) {
               mcf))
 
   var_labels <- c(
-    inv_w       = "投资强度（pa_built_10y，标准化）",
+    inv_w       = "投资强度（pa_built_10y）",
     cgi_score_w = "CGI政府治理指数（2021，截尾）",
     longitude   = "经度",
     latitude    = "纬度",
@@ -620,6 +725,186 @@ if (nrow(olr_tbl) > 0) {
 
 
 # =============================================================================
+# I2. 有序Logit 可视化
+#     (a) 森林图：所有预测变量系数 ± 95%CI，分气候区
+#     (b) 散点+箱线：投资/CGI 分位 × TRRI（原始数据关系）
+#     (c) 预测概率曲线：固定其他变量，投资/CGI 沿范围变化时 P(TRRI=k) 变化
+# =============================================================================
+
+cat("\n=== I2. 有序Logit 可视化 ===\n")
+
+if (nrow(olr_tbl) > 0) {
+  koppen_nm  <- c(ALL="全部", A="A(热带)", B="B(干旱)", C="C(温带)", D="D(大陆)")
+  koppen_col <- c("全部"="#555555","A(热带)"="#1B9E77","B(干旱)"="#D95F02",
+                  "C(温带)"="#7570B3","D(大陆)"="#E7298A")
+
+  # (a) 森林图：系数 ± 1.96*SE -------------------------------------------
+  forest_df <- olr_tbl %>%
+    mutate(
+      grp_label = factor(koppen_nm[koppen],
+                         levels = koppen_nm[c("ALL","B","C","D")]),
+      ci_lo     = coef - 1.96 * se,
+      ci_hi     = coef + 1.96 * se,
+      var_short = case_when(
+        variable == "inv_w"       ~ "单位面积投资",
+        variable == "cgi_score_w" ~ "CGI治理指数",
+        variable == "longitude"   ~ "经度",
+        variable == "latitude"    ~ "纬度",
+        variable == "koppen_B"    ~ "Köppen B",
+        variable == "koppen_C"    ~ "Köppen C",
+        variable == "koppen_D"    ~ "Köppen D",
+        TRUE ~ variable
+      ),
+      var_short = factor(var_short,
+                         levels = rev(c("单位面积投资","CGI治理指数","经度","纬度",
+                                        "Köppen B","Köppen C","Köppen D")))
+    ) %>%
+    filter(!is.na(grp_label))
+
+  p_forest <- ggplot(forest_df,
+                     aes(x = coef, y = var_short, color = grp_label)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50",
+               linewidth = 0.6) +
+    geom_linerange(aes(xmin = ci_lo, xmax = ci_hi),
+                   position = position_dodge(0.6), linewidth = 0.8) +
+    geom_point(aes(shape = sig %in% c("*","**","***",".")),
+               position = position_dodge(0.6), size = 2.8) +
+    scale_color_manual(values = koppen_col, name = "气候区") +
+    scale_shape_manual(values = c("TRUE"=16, "FALSE"=1),
+                       labels = c("TRUE"="显著(p<0.1)", "FALSE"="不显著"),
+                       name = "") +
+    labs(title    = "有序Logit各预测变量系数（森林图）",
+         subtitle = "水平线=95%CI；实心圆=p<0.1显著；纵轴=预测变量；横轴=log-odds系数",
+         x = "系数（Log-odds）", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right",
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor   = element_blank())
+
+  ggsave(file.path(OUT, "olr_forest.png"),
+         p_forest, width = 10, height = 6, dpi = 300)
+  cat("-> olr_forest.png\n")
+
+  # (b) 散点+箱线：将连续投资/CGI 分成5分位组，展示各组 TRRI 分布 --------
+  make_quantile_box <- function(df, xvar, xlabel) {
+    df %>%
+      filter(!is.na(.data[[xvar]]), .data[[xvar]] > 0,
+             !is.na(TRRI), !is.na(koppen_group)) %>%
+      mutate(
+        q5     = cut(.data[[xvar]],
+                     breaks = quantile(.data[[xvar]], probs = 0:5/5, na.rm = TRUE),
+                     include.lowest = TRUE, labels = paste0("Q", 1:5)),
+        kgroup = factor(koppen_nm[koppen_group],
+                        levels = koppen_nm[c("B","C","D")])
+      ) %>%
+      filter(!is.na(q5), !is.na(kgroup)) %>%
+      ggplot(aes(x = q5, y = TRRI, fill = kgroup)) +
+      geom_boxplot(outlier.size = 0.8, outlier.alpha = 0.5,
+                   linewidth = 0.5, alpha = 0.75) +
+      geom_smooth(aes(x = as.integer(q5), group = kgroup, color = kgroup),
+                  method = "loess", se = FALSE, linewidth = 1.2,
+                  show.legend = FALSE) +
+      scale_fill_manual(values  = c("B(干旱)"="#D95F02","C(温带)"="#7570B3",
+                                    "D(大陆)"="#E7298A"), name = "气候区") +
+      scale_color_manual(values = c("B(干旱)"="#D95F02","C(温带)"="#7570B3",
+                                    "D(大陆)"="#E7298A")) +
+      scale_y_continuous(breaks = seq(1, 18, 2)) +
+      labs(title    = sprintf("%s 五分位组 × TRRI 分布", xlabel),
+           subtitle = "箱线=各分位组TRRI分布；折线=loess趋势",
+           x = sprintf("%s（Q1=最低，Q5=最高）", xlabel),
+           y = "TRRI（1=全程抑制，18=全程促进）") +
+      theme_cn() +
+      theme(legend.position = "right")
+  }
+
+  p_box_inv <- make_quantile_box(anal_df, "pa_built_10y_w", "单位面积投资")
+  p_box_cgi <- make_quantile_box(anal_df, "cgi_score_w",    "CGI治理指数")
+
+  ggsave(file.path(OUT, "olr_box_invest.png"),
+         p_box_inv, width = 10, height = 5, dpi = 300)
+  cat("-> olr_box_invest.png\n")
+
+  ggsave(file.path(OUT, "olr_box_cgi.png"),
+         p_box_cgi, width = 10, height = 5, dpi = 300)
+  cat("-> olr_box_cgi.png\n")
+
+  # (c) 预测概率曲线：固定其他变量于中位数，沿自变量范围预测 TRRI --------
+  # 用全国模型（ALL）预测；展示 predicted mean TRRI（加权期望值）
+  make_pred_curve <- function(xvar, xlabel, n_pts = 50) {
+    d_all <- anal_df %>%
+      filter(!is.na(.data[[xvar]]), .data[[xvar]] > 0,
+             !is.na(TRRI), !is.na(cgi_score_w),
+             !is.na(longitude), !is.na(latitude),
+             !is.na(koppen_B))
+    if (nrow(d_all) < 30) return(NULL)
+
+    # 重建全国模型（与 run_olr_full 一致，但用于预测）
+    d_all$inv_w <- d_all[[xvar]]
+    d_all$Y_ord <- factor(d_all$TRRI, levels = sort(unique(d_all$TRRI)), ordered = TRUE)
+    ctrl_use <- ctrl_all[ctrl_all %in% names(d_all)]
+    ctrl_use <- ctrl_use[sapply(ctrl_use, function(v) var(d_all[[v]], na.rm=TRUE) > 0)]
+    # 投资变量名替换
+    pred_vars <- c("inv_w", ctrl_use[ctrl_use != xvar])
+    fml <- as.formula(paste("Y_ord ~", paste(pred_vars, collapse = "+")))
+    m <- tryCatch(
+      MASS::polr(fml, data = d_all, Hess = FALSE, method = "logistic"),
+      error = function(e) NULL)
+    if (is.null(m)) return(NULL)
+
+    # 预测数据框：xvar 沿范围变化，其余固定于中位数
+    xseq   <- seq(min(d_all[[xvar]], na.rm=TRUE),
+                  max(d_all[[xvar]], na.rm=TRUE), length.out = n_pts)
+    newdat <- d_all[rep(1, n_pts), pred_vars, drop = FALSE]
+    for (v in pred_vars) {
+      if (v != "inv_w") newdat[[v]] <- median(d_all[[v]], na.rm = TRUE)
+    }
+    newdat$inv_w <- xseq
+    # 强制转换 Y_ord levels 与训练集一致
+    levels_ord <- levels(d_all$Y_ord)
+    probs <- tryCatch(predict(m, newdat, type = "probs"), error = function(e) NULL)
+    if (is.null(probs)) return(NULL)
+    if (!is.matrix(probs)) probs <- matrix(probs, nrow = 1)
+
+    # 计算预测 E[TRRI]
+    trri_vals <- as.integer(levels_ord)
+    pred_mean <- as.numeric(probs %*% trri_vals)
+
+    # 95% CI via delta method（简化：用 ±1 TRRI 单位作为示意）
+    tibble(x = xseq, pred_trri = pred_mean,
+           xlabel = xlabel, xvar = xvar)
+  }
+
+  pred_inv <- make_pred_curve("pa_built_10y_w", "单位面积投资（万元/公顷）")
+  pred_cgi <- make_pred_curve("cgi_score_w",    "CGI治理指数")
+
+  pred_all <- bind_rows(pred_inv, pred_cgi) %>% filter(!is.na(pred_trri))
+
+  if (nrow(pred_all) > 0) {
+    # 同时展示两条预测曲线（分面）
+    p_pred <- ggplot(pred_all, aes(x = x, y = pred_trri)) +
+      geom_line(color = "#D73027", linewidth = 1.2) +
+      geom_rug(data = anal_df %>%
+                 pivot_longer(c(pa_built_10y_w, cgi_score_w),
+                              names_to = "xvar", values_to = "x") %>%
+                 filter(!is.na(x), x > 0) %>%
+                 mutate(xlabel = ifelse(xvar == "pa_built_10y_w",
+                                        "单位面积投资（万元/公顷）", "CGI治理指数")),
+               aes(x = x), sides = "b", alpha = 0.15, color = "grey40",
+               inherit.aes = FALSE) +
+      facet_wrap(~xlabel, scales = "free_x") +
+      labs(title    = "有序Logit：预测 TRRI 随管理变量的变化（全国模型）",
+           subtitle = "其余变量固定于中位数；竖线密度=实际数据分布",
+           x = "自变量取值", y = "预测 TRRI（期望值）") +
+      theme_cn()
+
+    ggsave(file.path(OUT, "olr_pred_curve.png"),
+           p_pred, width = 11, height = 5, dpi = 300)
+    cat("-> olr_pred_curve.png\n")
+  }
+}
+
+
+# =============================================================================
 # J. 多项Logit：stype（四类名义变量）~ pa_built_10y + cgi + 控制
 #    仅站点级；全国 + 分气候区；输出所有变量系数
 # =============================================================================
@@ -635,7 +920,7 @@ run_mnl_full <- function(df, inv_var, ctrl_vars, grp_label,
     cat(sprintf("  [跳过 %s] n=%d\n", grp_label, nrow(d)))
     return(NULL)
   }
-  d$inv_w   <- as.numeric(scale(d[[inv_var]]))
+  d$inv_w   <- d[[inv_var]]  # 仅截尾，不标准化
   d$stype_f <- relevel(factor(d$stype, levels = stype_levels), ref = ref)
   ctrl_use  <- ctrl_vars[ctrl_vars %in% names(d)]
   ctrl_use  <- ctrl_use[sapply(ctrl_use, function(v) var(d[[v]], na.rm = TRUE) > 0)]
@@ -659,7 +944,7 @@ run_mnl_full <- function(df, inv_var, ctrl_vars, grp_label,
                     collapse = " ")))
 
   var_labels <- c(
-    inv_w       = "投资强度（pa_built_10y，标准化）",
+    inv_w       = "投资强度（pa_built_10y）",
     cgi_score_w = "CGI政府治理指数（2021，截尾）",
     longitude   = "经度",
     latitude    = "纬度",
