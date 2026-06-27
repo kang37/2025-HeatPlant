@@ -21,7 +21,8 @@ pacman::p_load(
   dplyr, tidyr, purrr, ggplot2, stringr, readr,
   vegan, tibble, scales, showtext, sysfonts,
   targets, MASS, nnet, ggnewscale, patchwork, ggforce,
-  terra, sf, rnaturalearth, rnaturalearthdata
+  terra, sf, rnaturalearth, rnaturalearthdata,
+  geodata, osmextract
 )
 
 setwd("/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant")
@@ -220,31 +221,288 @@ invest_station <- station_city_map %>% left_join(city_vars, by = "city_name")
 
 
 # =============================================================================
+# E2. 站点降水量（meteo_data_1961-2023，生长季4-10月，2011-2020均值）
+# =============================================================================
+
+cat("\n=== E2. 站点降水量 ===\n")
+
+METEO_DIR   <- "data_raw/meteo_data_1961-2023"
+MISSING_VAL <- 999990   # 气象数据缺失值阈值（≥此值视为缺失）
+
+read_precip_station <- function(fpath) {
+  # 第1行：station_id,lon,lat；第2行：列名；其余：数据
+  header <- readLines(fpath, n = 1)
+  stat_id <- str_split(header, ",")[[1]][1]
+  d <- tryCatch(
+    read_csv(fpath, skip = 1, col_types = cols(.default = "d", date = "c"),
+             show_col_types = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(d) || !"precip" %in% names(d)) return(NULL)
+  d %>%
+    mutate(
+      meteo_stat_id = stat_id,
+      date          = as.Date(date),
+      year          = as.integer(format(date, "%Y")),
+      month         = as.integer(format(date, "%m")),
+      precip_clean  = ifelse(precip >= MISSING_VAL, NA_real_, precip)
+    ) %>%
+    filter(year >= 2011, year <= 2020, month >= 4, month <= 10) %>%
+    dplyr::select(meteo_stat_id, date, year, month, precip_clean)
+}
+
+PRECIP_CACHE <- "data_raw/precip_station_cache.rds"
+
+if (file.exists(PRECIP_CACHE)) {
+  cat("  [已缓存] 读取降水量站点数据...\n")
+  precip_station <- readRDS(PRECIP_CACHE)
+} else {
+  meteo_files <- list.files(METEO_DIR, pattern = "\\.txt$", full.names = TRUE)
+  cat(sprintf("  读取 %d 个气象站文件...\n", length(meteo_files)))
+
+  precip_raw <- map_dfr(meteo_files, read_precip_station)
+  cat(sprintf("  有效行数: %d\n", nrow(precip_raw)))
+
+  # 站点级：2011-2020生长季日均降水（mm/d）
+  precip_station <- precip_raw %>%
+    group_by(meteo_stat_id) %>%
+    summarise(
+      precip_mean = mean(precip_clean, na.rm = TRUE),
+      precip_n    = sum(!is.na(precip_clean)),
+      .groups = "drop"
+    ) %>%
+    filter(precip_n >= 100)   # 至少100天有效观测
+
+  saveRDS(precip_station, PRECIP_CACHE)
+  cat(sprintf("  降水量已缓存 -> %s\n", PRECIP_CACHE))
+}
+
+cat(sprintf("  降水量站点数（有效观测≥100天）: %d\n", nrow(precip_station)))
+cat(sprintf("  降水量范围: %.2f ~ %.2f mm/d\n",
+            min(precip_station$precip_mean, na.rm = TRUE),
+            max(precip_station$precip_mean, na.rm = TRUE)))
+
+
+# =============================================================================
+# E3. 土壤数据（SoilGrids via geodata，clay+sand，0-5cm，站点坐标提取）
+# =============================================================================
+
+cat("\n=== E3. 土壤数据（SoilGrids）===\n")
+
+SOIL_DIR <- "data_raw/soilgrids"
+dir.create(SOIL_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# 提取坐标（仅需要有CCM结果的站点）
+station_coords <- trri_df %>%
+  dplyr::select(meteo_stat_id, longitude, latitude) %>%
+  filter(!is.na(longitude), !is.na(latitude))
+
+# 下载中国范围的SoilGrids（clay + sand，0-5cm层，约20-50MB）
+# geodata::soil_world 下载全球瓦片，按范围裁剪
+china_ext <- terra::ext(72, 136, 17, 54)
+
+get_soil_rast <- function(var, depth = 5, path = SOIL_DIR) {
+  fname <- file.path(path, sprintf("soil_%s_%dcm.tif", var, depth))
+  if (file.exists(fname)) {
+    cat(sprintf("  [已缓存] %s\n", basename(fname)))
+    return(terra::rast(fname))
+  }
+  cat(sprintf("  [下载] %s %dcm...\n", var, depth))
+  r <- tryCatch(
+    geodata::soil_world(var = var, depth = depth, stat = "mean", path = path),
+    error = function(e) { cat(sprintf("  [soil下载失败: %s]\n", e$message)); NULL }
+  )
+  if (is.null(r)) return(NULL)
+  r_crop <- terra::crop(r, china_ext)
+  terra::writeRaster(r_crop, fname, overwrite = TRUE)
+  r_crop
+}
+
+soil_clay <- get_soil_rast("clay", 5)
+soil_sand <- get_soil_rast("sand", 5)
+
+# 按站点坐标提取土壤值
+extract_soil <- function(r, coords_df, var_name) {
+  if (is.null(r)) {
+    cat(sprintf("  [跳过 %s：栅格为NULL]\n", var_name))
+    return(tibble(meteo_stat_id = coords_df$meteo_stat_id, !!var_name := NA_real_))
+  }
+  pts <- terra::vect(coords_df, geom = c("longitude", "latitude"), crs = "EPSG:4326")
+  vals <- terra::extract(r, pts)[, 2]
+  tibble(meteo_stat_id = coords_df$meteo_stat_id, !!var_name := as.numeric(vals))
+}
+
+soil_df <- extract_soil(soil_clay, station_coords, "soil_clay") %>%
+  left_join(extract_soil(soil_sand, station_coords, "soil_sand"),
+            by = "meteo_stat_id")
+
+cat(sprintf("  clay 非NA: %d / %d\n",
+            sum(!is.na(soil_df$soil_clay)), nrow(soil_df)))
+cat(sprintf("  sand 非NA: %d / %d\n",
+            sum(!is.na(soil_df$soil_sand)), nrow(soil_df)))
+
+
+# =============================================================================
+# E4. 城市规模：常住人口（中国城市数据库1990-2023，2011-2020均值）
+# =============================================================================
+
+cat("\n=== E4. 城市常住人口 ===\n")
+
+city_pop_raw <- readxl::read_excel(
+  "data_raw/china_city_db2.xlsx",
+  sheet = 1, col_names = TRUE
+) %>%
+  rename(year = 1, city_name = 3, pop_resident = 24) %>%   # col24=常住人口(万人)
+  dplyr::select(year, city_name, pop_resident) %>%
+  filter(year >= 2011, year <= 2020) %>%
+  mutate(pop_resident = as.numeric(pop_resident))
+
+city_pop <- city_pop_raw %>%
+  group_by(city_name) %>%
+  summarise(pop_10y = mean(pop_resident, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    city_name = ifelse(str_detect(city_name, "市$"), city_name,
+                       paste0(city_name, "市"))
+  )
+
+cat(sprintf("  常住人口城市数: %d，范围: %.1f ~ %.1f 万人\n",
+            sum(!is.na(city_pop$pop_10y)),
+            min(city_pop$pop_10y, na.rm = TRUE),
+            max(city_pop$pop_10y, na.rm = TRUE)))
+
+
+# =============================================================================
+# E5. 道路密度（OSM Overpass API，站点10km缓冲区内道路长度/面积）
+# 逐站点查询 Overpass API，只下载每个站点周边的道路数据，无需整省下载
+# =============================================================================
+
+cat("\n=== E5. 道路密度（OSM Overpass API）===\n")
+
+ROAD_CACHE <- "data_raw/road_density_station.rds"
+
+if (file.exists(ROAD_CACHE)) {
+  cat("  [已缓存] 读取道路密度...\n")
+  road_df <- readRDS(ROAD_CACHE) %>%
+    mutate(meteo_stat_id = as.character(meteo_stat_id))
+} else {
+  if (!requireNamespace("osmdata", quietly = TRUE)) {
+    stop("请先安装 osmdata 包: install.packages('osmdata')")
+  }
+
+  main_road_types <- c("motorway","trunk","primary","secondary","tertiary",
+                       "unclassified","residential",
+                       "motorway_link","trunk_link","primary_link",
+                       "secondary_link","tertiary_link")
+  buf_radius_m  <- 10000          # 10 km 缓冲区半径
+  buf_area_km2  <- pi * 10^2      # ≈ 314.16 km²
+  # 10km半径对应的经纬度偏移量（粗略，用于Overpass bbox）
+  deg_offset    <- 0.09           # ~10km ≈ 0.09°
+
+  cat(sprintf("  共 %d 个站点，逐站查询 Overpass API...\n", nrow(station_coords)))
+
+  query_road_density <- function(sid, lon, lat) {
+    bbox <- c(lat - deg_offset, lon - deg_offset,
+              lat + deg_offset, lon + deg_offset)
+    q <- tryCatch(
+      osmdata::opq(bbox = bbox, timeout = 60) %>%
+        osmdata::add_osm_feature(key = "highway",
+                                 value = main_road_types) %>%
+        osmdata::osmdata_sf(quiet = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(q) || is.null(q$osm_lines) || nrow(q$osm_lines) == 0) return(0)
+
+    # 投影到 UTM zone 50N（中国中部，通用）
+    roads_proj <- tryCatch(sf::st_transform(q$osm_lines, crs = 32650),
+                           error = function(e) NULL)
+    if (is.null(roads_proj)) return(0)
+
+    center_sf <- sf::st_sfc(sf::st_point(c(lon, lat)), crs = 4326) %>%
+      sf::st_transform(crs = 32650)
+    buf <- sf::st_buffer(center_sf, dist = buf_radius_m)
+
+    roads_clip <- tryCatch(sf::st_intersection(roads_proj, buf),
+                           error = function(e) NULL)
+    if (is.null(roads_clip) || nrow(roads_clip) == 0) return(0)
+
+    as.numeric(sum(sf::st_length(roads_clip), na.rm = TRUE) / 1000) / buf_area_km2
+  }
+
+  # 逐站查询，失败则返回 NA，并每10站打印进度
+  density_vals <- map_dbl(seq_len(nrow(station_coords)), function(i) {
+    if (i %% 10 == 0)
+      cat(sprintf("    进度: %d / %d\n", i, nrow(station_coords)))
+    row <- station_coords[i, ]
+    result <- tryCatch(
+      query_road_density(row$meteo_stat_id, row$longitude, row$latitude),
+      error = function(e) NA_real_
+    )
+    if (is.null(result)) NA_real_ else result
+  })
+
+  road_df <- station_coords %>%
+    mutate(road_density = density_vals)
+
+  n_ok <- sum(!is.na(road_df$road_density))
+  cat(sprintf("  道路密度完成：%d / %d 站点有值\n", n_ok, nrow(road_df)))
+  saveRDS(road_df, ROAD_CACHE)
+  cat(sprintf("  道路密度已缓存 -> %s\n", ROAD_CACHE))
+}
+
+if (any(!is.na(road_df$road_density))) {
+  cat(sprintf("  road_density 非NA: %d / %d，范围: %.3f ~ %.3f km/km²\n",
+              sum(!is.na(road_df$road_density)), nrow(road_df),
+              min(road_df$road_density, na.rm = TRUE),
+              max(road_df$road_density, na.rm = TRUE)))
+} else {
+  cat(sprintf("  road_density 非NA: 0 / %d（全部为NA，等待OSM数据）\n", nrow(road_df)))
+}
+
+
+# =============================================================================
 # F. 合并分析数据框（仅站点级）
 # =============================================================================
 
 cat("\n=== F. 合并分析数据框 ===\n")
 
 anal_df <- trri_df %>%
-  left_join(invest_station, by = "meteo_stat_id") %>%
+  left_join(invest_station,  by = "meteo_stat_id") %>%
+  left_join(precip_station,  by = "meteo_stat_id") %>%
+  left_join(soil_df,         by = "meteo_stat_id") %>%
+  left_join(dplyr::select(road_df, meteo_stat_id, road_density, building_density),
+                           by = "meteo_stat_id") %>%
+  # 城市级背景变量（通过city_name连接）
+  left_join(city_pop,        by = "city_name") %>%
   filter(!is.na(TRRI), !is.na(longitude), !is.na(latitude),
          !is.na(koppen_group)) %>%
   mutate(
     koppen_B         = as.integer(koppen_group == "B"),
     koppen_C         = as.integer(koppen_group == "C"),
     koppen_D         = as.integer(koppen_group == "D"),
+    # 管理变量（截尾，不标准化）
     pa_built_10y_w   = winsorize(pa_built_10y),
-    pgdp_10y_w       = winsorize(pgdp_10y),
-    urban_rate_10y_w = winsorize(urban_rate_10y),
     cgi_score_w      = winsorize(cgi_score),
+    # Local变量
+    precip_mean_w    = winsorize(precip_mean),
+    soil_clay_w      = winsorize(soil_clay),
+    soil_sand_w      = winsorize(soil_sand),
+    # 背景变量
+    pop_10y_w          = winsorize(pop_10y),
+    road_density_w     = winsorize(road_density),
+    building_density_w = winsorize(building_density),
+    # 旧变量保留（兼容）
+    pgdp_10y_w       = winsorize(pgdp_10y),
     TRRI_ord         = factor(TRRI, levels = 1:TRRI_MAX, ordered = TRUE),
     stype_fct        = factor(stype, levels = stype_levels, labels = stype_labels)
   )
 
 cat(sprintf("站点总数: %d\n", nrow(anal_df)))
 cat(sprintf("pa_built_10y 非NA: %d\n",    sum(!is.na(anal_df$pa_built_10y))))
-cat(sprintf("pgdp_10y 非NA: %d\n",        sum(!is.na(anal_df$pgdp_10y))))
 cat(sprintf("cgi_score 非NA: %d\n",       sum(!is.na(anal_df$cgi_score))))
+cat(sprintf("precip_mean 非NA: %d\n",     sum(!is.na(anal_df$precip_mean))))
+cat(sprintf("soil_clay 非NA: %d\n",       sum(!is.na(anal_df$soil_clay))))
+cat(sprintf("pop_10y 非NA: %d\n",         sum(!is.na(anal_df$pop_10y))))
+cat(sprintf("road_density 非NA: %d\n",    sum(!is.na(anal_df$road_density))))
 cat("气候组分布:\n"); print(count(anal_df, koppen_group))
 
 # 城市级（仅用于G3热图，不做回归）
@@ -1178,70 +1436,84 @@ if (nrow(mnl_tbl) > 0) {
 #    仅站点级；全国 + 分气候区；基础控制 + 扩展控制（含pgdp）
 # =============================================================================
 
-cat("\n=== K. 方差分解 ===\n")
+cat("\n=== K. 方差分解（三组）===\n")
+# 组1 管理：投资强度 + CGI
+# 组2 Local：降水量 + 土壤（clay/sand）
+# 组3 背景：常住人口 + 道路密度
 
-# 管理变量组（需要两者均非NA且>0）
-mgmt_vars <- c("pa_built_10y_w", "cgi_score_w")
+mgmt_vars  <- c("pa_built_10y_w", "cgi_score_w")
+local_vars <- c("precip_mean_w", "soil_clay_w", "soil_sand_w")
+bg_vars    <- c("pop_10y_w", "road_density_w", "building_density_w")
 
-run_vp_full <- function(df, outcome_var, mgmt_set, geo_set, grp_label, ctrl_label) {
-  # 过滤：管理变量均有值，且投资 > 0
+run_vp3 <- function(df, outcome_var, mv, lv, bv, grp_label) {
+  req_vars <- c(mv, lv, bv)
   d <- df %>%
     filter(!is.na(pa_built_10y), pa_built_10y > 0,
            !is.na(.data[[outcome_var]])) %>%
-    filter(if_all(all_of(mgmt_set[mgmt_set %in% names(.)]), ~!is.na(.x))) %>%
-    filter(if_all(all_of(geo_set[geo_set %in% names(.)]),  ~!is.na(.x)))
-  if (nrow(d) < 15) {
-    cat(sprintf("  [跳过 %s|%s] n=%d\n", grp_label, ctrl_label, nrow(d)))
+    filter(if_all(all_of(req_vars[req_vars %in% names(.)]), ~!is.na(.x)))
+
+  if (nrow(d) < 20) {
+    cat(sprintf("  [跳过 %s] n=%d（满足三组完整数据不足20）\n", grp_label, nrow(d)))
     return(NULL)
   }
-  mgmt_use <- mgmt_set[mgmt_set %in% names(d)]
-  mgmt_use <- mgmt_use[sapply(mgmt_use, function(v) var(d[[v]], na.rm=TRUE) > 0)]
-  geo_use  <- geo_set[geo_set %in% names(d)]
-  geo_use  <- geo_use[sapply(geo_use,  function(v) var(d[[v]], na.rm=TRUE) > 0)]
-  if (length(mgmt_use) == 0 || length(geo_use) == 0) return(NULL)
+
+  # 过滤零方差变量
+  filter_nonzero <- function(vars) {
+    vars[vars %in% names(d) & sapply(vars[vars %in% names(d)],
+                                      function(v) var(d[[v]], na.rm=TRUE) > 0)]
+  }
+  mv_use <- filter_nonzero(mv)
+  lv_use <- filter_nonzero(lv)
+  bv_use <- filter_nonzero(bv)
+
+  if (length(mv_use) == 0 || length(lv_use) == 0 || length(bv_use) == 0) {
+    cat(sprintf("  [跳过 %s] 某组变量全为零方差\n", grp_label))
+    return(NULL)
+  }
 
   vp <- tryCatch(
     vegan::varpart(d[[outcome_var]],
-                   dplyr::select(d, all_of(mgmt_use)),
-                   dplyr::select(d, all_of(geo_use))),
+                   dplyr::select(d, all_of(mv_use)),
+                   dplyr::select(d, all_of(lv_use)),
+                   dplyr::select(d, all_of(bv_use))),
     error = function(e) { cat(sprintf("  [varpart error: %s]\n", e$message)); NULL })
   if (is.null(vp)) return(NULL)
 
-  fr <- vp$part$indfract
+  # indfract 三分组时有8行（2^3），行序：
+  # [a]=X1独立, [b]=X2独立, [c]=X3独立,
+  # [d]=X1∩X2, [e]=X1∩X3, [f]=X2∩X3, [g]=X1∩X2∩X3, [h]=未解释
+  fr <- vp$part$indfract$Adj.R.square
+
   cat(sprintf(
-    "  [%s|%s] n=%d  管理=%.2f%%  地理=%.2f%%  共享=%.2f%%  未解释=%.2f%%\n",
-    grp_label, ctrl_label, nrow(d),
-    fr$Adj.R.square[1]*100, fr$Adj.R.square[2]*100,
-    fr$Adj.R.square[3]*100, fr$Adj.R.square[4]*100))
+    "  [%s] n=%d  管理=%.2f%% Local=%.2f%% 背景=%.2f%% 未解释=%.2f%%\n",
+    grp_label, nrow(d),
+    fr[1]*100, fr[2]*100, fr[3]*100, fr[8]*100))
 
   tibble(
     koppen        = grp_label,
-    ctrl_type     = ctrl_label,
     n             = nrow(d),
-    mgmt_vars_used = paste(mgmt_use, collapse = "+"),
-    geo_vars_used  = paste(geo_use,  collapse = "+"),
-    mgmt_only     = round(fr$Adj.R.square[1]*100, 2),  # [a] 管理独立
-    geo_only      = round(fr$Adj.R.square[2]*100, 2),  # [b] 地理独立
-    shared        = round(fr$Adj.R.square[3]*100, 2),  # [c] 共享
-    unexplained   = round(fr$Adj.R.square[4]*100, 2),  # [d] 未解释
-    mgmt_total    = round((fr$Adj.R.square[1]+fr$Adj.R.square[3])*100, 2),
-    geo_total     = round((fr$Adj.R.square[2]+fr$Adj.R.square[3])*100, 2)
+    mgmt_vars_used  = paste(mv_use, collapse = "+"),
+    local_vars_used = paste(lv_use, collapse = "+"),
+    bg_vars_used    = paste(bv_use, collapse = "+"),
+    mgmt_only     = round(fr[1]*100, 2),
+    local_only    = round(fr[2]*100, 2),
+    bg_only       = round(fr[3]*100, 2),
+    mgmt_local    = round(fr[4]*100, 2),
+    mgmt_bg       = round(fr[5]*100, 2),
+    local_bg      = round(fr[6]*100, 2),
+    triple        = round(fr[7]*100, 2),
+    unexplained   = round(fr[8]*100, 2)
   )
 }
 
-# 地理变量组：全国含Köppen哑变量；分区内仅经纬度
-geo_vp_all   <- c("longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
-geo_vp_inner <- c("longitude", "latitude")
-
 vp_tbl <- map_dfr(koppen_all, function(grp) {
-  df_g  <- if (grp == "ALL") anal_df else filter(anal_df, koppen_group == grp)
-  geo_v <- if (grp == "ALL") geo_vp_all else geo_vp_inner
-  run_vp_full(df_g, "TRRI", mgmt_vars, geo_v, grp, "")
+  df_g <- if (grp == "ALL") anal_df else filter(anal_df, koppen_group == grp)
+  run_vp3(df_g, "TRRI", mgmt_vars, local_vars, bg_vars, grp)
 })
 
 cat("\n=== K. 方差分解汇总 ===\n")
 print(vp_tbl %>%
-        dplyr::select(koppen, n, mgmt_only, geo_only, shared, unexplained))
+        dplyr::select(koppen, n, mgmt_only, local_only, bg_only, unexplained))
 
 write_csv(vp_tbl, file.path(OUT, "varpart_results.csv"))
 cat("-> varpart_results.csv\n")
@@ -1254,16 +1526,16 @@ if (nrow(vp_tbl) > 0) {
                               levels = koppen_nm[intersect(c("ALL","A","B","C","D"), koppen)])) %>%
     filter(!is.na(grp_label))
 
-  # 图1：各分量堆叠条形图
+  # 图1：三组独立解释力堆叠条形图（仅独立分量，忽略共享）
   p_vp_stack <- vp_plot_df %>%
-    pivot_longer(c(mgmt_only, shared, geo_only, unexplained),
+    pivot_longer(c(mgmt_only, local_only, bg_only, unexplained),
                  names_to = "component", values_to = "r2") %>%
     mutate(
       r2_show    = pmax(r2, 0),
       comp_label = factor(component,
-                          levels = c("mgmt_only","shared","geo_only","unexplained"),
-                          labels = c("[a] 管理（独立）","[c] 共享",
-                                     "[b] 地理（独立）","[d] 未解释"))
+                          levels = c("mgmt_only","local_only","bg_only","unexplained"),
+                          labels = c("[a] 管理（独立）","[b] Local（独立）",
+                                     "[c] 背景（独立）","[d] 未解释/共享"))
     ) %>%
     ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
     geom_col(position = "stack", alpha = 0.88, width = 0.65) +
@@ -1271,12 +1543,12 @@ if (nrow(vp_tbl) > 0) {
               position = position_stack(vjust = 0.5),
               size = 3.5, family = "heiti", color = "white") +
     scale_fill_manual(
-      values = c("[a] 管理（独立）"="#D73027", "[c] 共享"="#FDAE61",
-                 "[b] 地理（独立）"="#4575B4", "[d] 未解释"="#CCCCCC"),
+      values = c("[a] 管理（独立）"="#D73027", "[b] Local（独立）"="#2CA25F",
+                 "[c] 背景（独立）"="#4575B4", "[d] 未解释/共享"="#CCCCCC"),
       name = "方差分量") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
-    labs(title    = "方差分解：管理（投资+CGI）vs 地理",
-         subtitle = "[a]=管理独立；[b]=地理独立；[c]=共享；[d]=未解释\n（调整R²，负值显示为0；管理=pa_built_10y_w + cgi_score_w）",
+    labs(title    = "方差分解（三组）：管理 vs Local vs 背景",
+         subtitle = "管理=投资+CGI；Local=降水+土壤；背景=人口+道路密度\n（调整R²独立分量，负值显示为0）",
          x = NULL, y = "调整R²（%）") +
     theme_cn() +
     theme(legend.position = "right")
@@ -1285,28 +1557,126 @@ if (nrow(vp_tbl) > 0) {
          p_vp_stack, width = 11, height = 5, dpi = 300)
   cat("-> varpart_stack.png\n")
 
-  # 图2：管理独立解释力[a]各气候区
-  p_vp_mgmt <- vp_plot_df %>%
+  # 图2：三组独立解释力并排比较
+  p_vp_compare <- vp_plot_df %>%
+    pivot_longer(c(mgmt_only, local_only, bg_only),
+                 names_to = "group", values_to = "r2") %>%
     mutate(
-      r2_show  = pmax(mgmt_only, 0),
-      r2_label = sprintf("%.2f%%", mgmt_only)
+      r2_show   = pmax(r2, 0),
+      grp_lbl   = factor(group,
+                          levels = c("mgmt_only","local_only","bg_only"),
+                          labels = c("管理","Local","背景")),
+      r2_label  = sprintf("%.2f%%", r2)
     ) %>%
-    ggplot(aes(x = grp_label, y = r2_show, fill = grp_label)) +
-    geom_col(width = 0.6, alpha = 0.85) +
-    geom_text(aes(label = r2_label), vjust = -0.4, size = 4, family = "heiti") +
+    ggplot(aes(x = grp_label, y = r2_show, fill = grp_lbl)) +
+    geom_col(position = "dodge", width = 0.7, alpha = 0.85) +
+    geom_text(aes(label = r2_label),
+              position = position_dodge(0.7), vjust = -0.4,
+              size = 3.2, family = "heiti") +
     scale_fill_manual(
-      values = c("全部"="#888888", "A(热带)"="#2CA25F", "B(干旱)"="#D95F0E",
-                 "C(温带)"="#3182BD", "D(大陆)"="#756BB1"),
-      guide = "none") +
+      values = c("管理"="#D73027","Local"="#2CA25F","背景"="#4575B4"),
+      name = "变量组") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
-    labs(title    = "方差分解：管理独立解释力（[a]分量）",
-         subtitle = "管理 = pa_built_10y_w + cgi_score_w；负值代表独立贡献低于随机水平（显示为0）",
-         x = NULL, y = "管理独立调整R²（%）") +
-    theme_cn()
+    labs(title    = "方差分解：各组独立解释力比较（分气候区）",
+         subtitle = "负值代表独立贡献低于随机水平（显示为0）",
+         x = NULL, y = "独立调整R²（%）") +
+    theme_cn() +
+    theme(legend.position = "right")
 
-  ggsave(file.path(OUT, "varpart_mgmt_only.png"),
-         p_vp_mgmt, width = 9, height = 5, dpi = 300)
-  cat("-> varpart_mgmt_only.png\n")
+  ggsave(file.path(OUT, "varpart_compare.png"),
+         p_vp_compare, width = 11, height = 5, dpi = 300)
+  cat("-> varpart_compare.png\n")
+}
+
+
+# =============================================================================
+# L. 气候区 × CCM类型 分层回归（有序Logit：TRRI ~ 管理变量）
+#    分层：koppen_group（A/B/C/D）× stype（4类）→ 最多16个子组
+#    仅站点级；控制变量：经纬度（子组内不再含Köppen哑变量）
+#    输出：子组系数表 + 气泡热图（效应大小/方向/显著性）
+# =============================================================================
+
+cat("\n=== L. 气候区×CCM类型 分层回归 ===\n")
+
+koppen_groups <- sort(unique(anal_df$koppen_group))
+# stype_levels 已在开头定义
+
+strata_tbl <- map_dfr(koppen_groups, function(kg) {
+  map_dfr(stype_levels, function(st) {
+    df_sub <- anal_df %>%
+      filter(koppen_group == kg, stype == st)
+    grp_label <- sprintf("%s|%s", kg, st)
+
+    # 控制：经纬度（无Köppen哑变量，子组内气候区已固定）
+    ctrl_sub <- c("cgi_score_w", "longitude", "latitude")
+
+    result <- run_olr_full(df_sub, "pa_built_10y_w", ctrl_sub, grp_label)
+    if (!is.null(result)) {
+      result %>% mutate(koppen_group = kg, stype = st, .before = 1)
+    }
+  })
+})
+
+if (nrow(strata_tbl) > 0) {
+  cat("\n=== L. 分层回归：管理变量系数汇总 ===\n")
+  print(strata_tbl %>%
+          filter(variable %in% c("inv_w", "cgi_score_w")) %>%
+          dplyr::select(koppen_group, stype, variable, n, coef, se, p_val, sig))
+
+  write_csv(strata_tbl, file.path(OUT, "olr_strata_koppen_stype_coef.csv"))
+  cat("-> olr_strata_koppen_stype_coef.csv\n")
+
+  # 气泡热图：横轴=stype，纵轴=气候区，大小=|coef|，颜色=方向，透明度=显著性
+  stype_lmap_short <- c(
+    always_inhibit  = "全程抑制",
+    inhibit_promote = "抑制→促进",
+    promote_inhibit = "促进→抑制",
+    always_promote  = "全程促进"
+  )
+  koppen_nm_short <- c(A="A(热带)", B="B(干旱)", C="C(温带)", D="D(大陆)")
+
+  bubble_df <- strata_tbl %>%
+    filter(variable %in% c("inv_w", "cgi_score_w")) %>%
+    mutate(
+      stype_lbl  = factor(stype_lmap_short[stype], levels = stype_labels),
+      koppen_lbl = factor(koppen_nm_short[koppen_group],
+                          levels = koppen_nm_short[c("A","B","C","D")]),
+      var_lbl    = ifelse(variable == "inv_w", "投资强度", "CGI治理指数"),
+      sig_alpha  = case_when(
+        sig %in% c("***","**","*") ~ 1.0,
+        sig == "."                 ~ 0.65,
+        TRUE                       ~ 0.30
+      ),
+      coef_dir   = ifelse(coef > 0, "正（促进TRRI）", "负（抑制TRRI）")
+    ) %>%
+    filter(!is.na(stype_lbl), !is.na(koppen_lbl))
+
+  p_bubble <- ggplot(bubble_df,
+                     aes(x = stype_lbl, y = koppen_lbl,
+                         size = pmin(abs(coef), 2),
+                         color = coef_dir, alpha = sig_alpha)) +
+    geom_point(shape = 16) +
+    geom_text(aes(label = sprintf("β=%.2f\n%s", coef, sig)),
+              size = 2.6, family = "heiti", vjust = 2.5, alpha = 1) +
+    scale_size_continuous(range = c(2, 12), name = "|β|（截断≤2）") +
+    scale_color_manual(
+      values = c("正（促进TRRI）"="#D73027","负（抑制TRRI）"="#4575B4"),
+      name = "效应方向") +
+    scale_alpha_identity() +
+    facet_wrap(~var_lbl, nrow = 1) +
+    labs(title    = "气候区 × CCM类型 分层有序Logit系数",
+         subtitle = "气泡大小=|β|；颜色=方向；透明度：实=p<0.05, 半透=p<0.1, 淡=不显著\nn<15的子组已跳过",
+         x = "CCM响应类型（stype）", y = "气候区") +
+    theme_cn() +
+    theme(axis.text.x = element_text(angle = 15, hjust = 1),
+          panel.grid.major = element_line(color = "grey92"),
+          legend.position = "right")
+
+  ggsave(file.path(OUT, "strata_bubble_koppen_stype.png"),
+         p_bubble, width = 14, height = 6, dpi = 300)
+  cat("-> strata_bubble_koppen_stype.png\n")
+} else {
+  cat("  [警告] 分层回归无有效结果（各子组n均不足15）\n")
 }
 
 
