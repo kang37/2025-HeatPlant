@@ -469,7 +469,7 @@ anal_df <- trri_df %>%
   left_join(invest_station,  by = "meteo_stat_id") %>%
   left_join(precip_station,  by = "meteo_stat_id") %>%
   left_join(soil_df,         by = "meteo_stat_id") %>%
-  left_join(dplyr::select(road_df, meteo_stat_id, road_density, building_density),
+  left_join(dplyr::select(road_df, meteo_stat_id, road_density),
                            by = "meteo_stat_id") %>%
   # 城市级背景变量（通过city_name连接）
   left_join(city_pop,        by = "city_name") %>%
@@ -489,7 +489,6 @@ anal_df <- trri_df %>%
     # 背景变量
     pop_10y_w          = winsorize(pop_10y),
     road_density_w     = winsorize(road_density),
-    building_density_w = winsorize(building_density),
     # 旧变量保留（兼容）
     pgdp_10y_w       = winsorize(pgdp_10y),
     TRRI_ord         = factor(TRRI, levels = 1:TRRI_MAX, ordered = TRUE),
@@ -1037,9 +1036,11 @@ run_olr_full <- function(df, inv_var, ctrl_vars, grp_label) {
                 error = function(e) { cat(sprintf("  [summary error: %s]\n", e$message)); NULL })
   if (is.null(s)) return(NULL)
 
-  coef_mat <- s$coefficients[all_pred, , drop = FALSE]
-  z_vec    <- coef_mat[, "t value"]
-  pval_vec <- 2 * pnorm(abs(z_vec), lower.tail = FALSE)
+  # 用模型实际保留的系数（rank-deficient 时 polr 会自动删掉部分变量）
+  kept_pred <- intersect(all_pred, rownames(s$coefficients))
+  coef_mat  <- s$coefficients[kept_pred, , drop = FALSE]
+  z_vec     <- setNames(coef_mat[, "t value"], kept_pred)
+  pval_vec  <- setNames(2 * pnorm(abs(z_vec), lower.tail = FALSE), kept_pred)
 
   m0  <- tryCatch(MASS::polr(Y_ord ~ 1, data = d, Hess = FALSE),
                   error = function(e) NULL)
@@ -1047,14 +1048,16 @@ run_olr_full <- function(df, inv_var, ctrl_vars, grp_label) {
     round(1 - as.numeric(logLik(m)) / as.numeric(logLik(m0)), 4)
   else NA_real_
 
+  get_v <- function(v, mat, pv) list(
+    b = if (v %in% rownames(mat)) mat[v, "Value"] else NA_real_,
+    p = if (v %in% names(pv))    pv[v]           else NA_real_,
+    s = if (v %in% names(pv))    sig_star(pv[v]) else ""
+  )
+  iv  <- get_v("inv_w",      coef_mat, pval_vec)
+  cgi <- get_v("cgi_score_w", coef_mat, pval_vec)
   cat(sprintf("  [%s] n=%d  inv_w: β=%.4f p=%.4f%s  cgi: β=%.4f p=%.4f%s  McF=%.4f\n",
               grp_label, nrow(d),
-              coef_mat["inv_w", "Value"], pval_vec["inv_w"],
-              sig_star(pval_vec["inv_w"]),
-              ifelse("cgi_score_w" %in% all_pred, coef_mat["cgi_score_w","Value"], NA),
-              ifelse("cgi_score_w" %in% all_pred, pval_vec["cgi_score_w"], NA),
-              ifelse("cgi_score_w" %in% all_pred, sig_star(pval_vec["cgi_score_w"]), ""),
-              mcf))
+              iv$b, iv$p, iv$s, cgi$b, cgi$p, cgi$s, mcf))
 
   var_labels <- c(
     inv_w       = "投资强度（pa_built_10y）",
@@ -1442,8 +1445,8 @@ cat("\n=== K. 方差分解（三组）===\n")
 # 组3 背景：常住人口 + 道路密度
 
 mgmt_vars  <- c("pa_built_10y_w", "cgi_score_w")
-local_vars <- c("precip_mean_w", "soil_clay_w", "soil_sand_w")
-bg_vars    <- c("pop_10y_w", "road_density_w", "building_density_w")
+local_vars <- c("precip_mean_w")
+bg_vars    <- c("pop_10y_w", "road_density_w")
 
 run_vp3 <- function(df, outcome_var, mv, lv, bv, grp_label) {
   req_vars <- c(mv, lv, bv)
@@ -1548,7 +1551,10 @@ if (nrow(vp_tbl) > 0) {
       name = "方差分量") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
     labs(title    = "方差分解（三组）：管理 vs Local vs 背景",
-         subtitle = "管理=投资+CGI；Local=降水+土壤；背景=人口+道路密度\n（调整R²独立分量，负值显示为0）",
+         subtitle = paste0("因变量：TRRI（全样本，1–18）\n",
+                           "[a] 管理 = 投资强度（pa_built_10y）+ CGI治理指数\n",
+                           "[b] Local = 降水量；[c] 背景 = 常住人口 + 道路密度\n",
+                           "调整R²独立分量（负值显示为0）"),
          x = NULL, y = "调整R²（%）") +
     theme_cn() +
     theme(legend.position = "right")
@@ -1578,7 +1584,9 @@ if (nrow(vp_tbl) > 0) {
       name = "变量组") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
     labs(title    = "方差分解：各组独立解释力比较（分气候区）",
-         subtitle = "负值代表独立贡献低于随机水平（显示为0）",
+         subtitle = paste0("因变量：TRRI（全样本，1–18）\n",
+                           "管理 = 投资强度 + CGI；Local = 降水量；背景 = 常住人口 + 道路密度\n",
+                           "（负值代表独立贡献低于随机水平，显示为0）"),
          x = NULL, y = "独立调整R²（%）") +
     theme_cn() +
     theme(legend.position = "right")
@@ -1677,6 +1685,448 @@ if (nrow(strata_tbl) > 0) {
   cat("-> strata_bubble_koppen_stype.png\n")
 } else {
   cat("  [警告] 分层回归无有效结果（各子组n均不足15）\n")
+}
+
+
+# =============================================================================
+# M. 促进/抑制分组分析
+#    促进组：stype %in% c("always_promote", "promote_inhibit")
+#    抑制组：stype %in% c("always_inhibit", "inhibit_promote")
+#    对每组分别做：
+#      M1. 有序Logit（全国 + 分气候区）
+#      M2. 三组方差分解（varpart）
+# =============================================================================
+
+cat("\n=== M. 促进/抑制分组分析 ===\n")
+
+# TRRI 组内重新编码（统一为 1=最差, 9=最好）：
+#   抑制组 (TRRI 1-9) : 1=全程抑制, 9=很快转促进  → 保持原值
+#   促进组 (TRRI 10-18): 10=很快转抑制, 18=全程促进 → 减9，映射到 1-9
+anal_df <- anal_df %>%
+  mutate(
+    response_group = ifelse(
+      stype %in% c("always_promote", "promote_inhibit"), "促进", "抑制"
+    ),
+    TRRI_g = ifelse(response_group == "促进", TRRI - 9L, TRRI),
+    TRRI_g_ord = factor(TRRI_g, levels = 1:9, ordered = TRUE)
+  )
+
+group_labels <- c("促进", "抑制")
+
+# M0. 原始数据关系图：投资/CGI vs TRRI_g（分促进/抑制组）
+plot_df_m0 <- anal_df %>%
+  filter(!is.na(pa_built_10y_w), !is.na(cgi_score_w), !is.na(TRRI_g)) %>%
+  mutate(
+    rg_label = factor(response_group,
+                      levels = c("抑制", "促进"),
+                      labels = c("抑制组（1=全程抑制, 9=很快转促进）",
+                                 "促进组（1=很快转抑制, 9=全程促进）"))
+  )
+
+# 投资强度 vs TRRI_g
+p_raw_inv <- plot_df_m0 %>%
+  ggplot(aes(x = pa_built_10y_w, y = TRRI_g)) +
+  geom_jitter(aes(color = response_group), height = 0.25, width = 0,
+              alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 0.8) +
+  scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                     guide = "none") +
+  scale_y_continuous(breaks = 1:9) +
+  facet_wrap(~rg_label, scales = "free_x") +
+  labs(title    = "投资强度 vs 组内TRRI（原始数据）",
+       subtitle = "黑线为OLS趋势线±95%CI；点有垂直抖动",
+       x = "投资强度（pa_built_10y，截尾）", y = "TRRI_g（组内重编码）") +
+  theme_cn()
+
+ggsave(file.path(OUT, "raw_invest_vs_trri_g.png"),
+       p_raw_inv, width = 12, height = 5, dpi = 300)
+cat("-> raw_invest_vs_trri_g.png\n")
+
+# CGI vs TRRI_g
+p_raw_cgi <- plot_df_m0 %>%
+  ggplot(aes(x = cgi_score_w, y = TRRI_g)) +
+  geom_jitter(aes(color = response_group), height = 0.25, width = 0,
+              alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 0.8) +
+  scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                     guide = "none") +
+  scale_y_continuous(breaks = 1:9) +
+  facet_wrap(~rg_label, scales = "free_x") +
+  labs(title    = "CGI治理指数 vs 组内TRRI（原始数据）",
+       subtitle = "黑线为OLS趋势线±95%CI；点有垂直抖动",
+       x = "CGI治理指数（截尾）", y = "TRRI_g（组内重编码）") +
+  theme_cn()
+
+ggsave(file.path(OUT, "raw_cgi_vs_trri_g.png"),
+       p_raw_cgi, width = 12, height = 5, dpi = 300)
+cat("-> raw_cgi_vs_trri_g.png\n")
+
+# 箱线图：按TRRI_g分组，展示投资/CGI分布
+p_box_inv <- plot_df_m0 %>%
+  ggplot(aes(x = factor(TRRI_g), y = pa_built_10y_w, fill = response_group)) +
+  geom_boxplot(outlier.size = 0.8, outlier.alpha = 0.4, linewidth = 0.4) +
+  scale_fill_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                    name = "响应类型") +
+  facet_wrap(~rg_label, scales = "free") +
+  labs(title = "各TRRI_g等级的投资强度分布",
+       x = "TRRI_g（组内重编码）", y = "投资强度（pa_built_10y，截尾）") +
+  theme_cn() + theme(legend.position = "none")
+
+p_box_cgi <- plot_df_m0 %>%
+  ggplot(aes(x = factor(TRRI_g), y = cgi_score_w, fill = response_group)) +
+  geom_boxplot(outlier.size = 0.8, outlier.alpha = 0.4, linewidth = 0.4) +
+  scale_fill_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                    name = "响应类型") +
+  facet_wrap(~rg_label, scales = "free") +
+  labs(title = "各TRRI_g等级的CGI治理指数分布",
+       x = "TRRI_g（组内重编码）", y = "CGI治理指数（截尾）") +
+  theme_cn() + theme(legend.position = "none")
+
+p_box_combined <- p_box_inv / p_box_cgi
+ggsave(file.path(OUT, "raw_boxplot_trri_g.png"),
+       p_box_combined, width = 12, height = 9, dpi = 300)
+cat("-> raw_boxplot_trri_g.png\n")
+
+# run_olr_full 使用 TRRI_ord 作为因变量，需临时替换为 TRRI_g_ord
+# 在 M 段用专用包装函数，传入重编码因变量
+run_olr_group <- function(df, inv_var, ctrl_vars, grp_label) {
+  df <- df %>% mutate(TRRI = TRRI_g)  # 用组内重编码值替换，1-9统一方向
+  run_olr_full(df, inv_var, ctrl_vars, grp_label)
+}
+
+# 全变量控制变量（含 local + bg 组所有变量）
+all_vars_ctrl_all   <- c("cgi_score_w",
+                         "precip_mean_w",
+                         "pop_10y_w", "road_density_w",
+                         "longitude", "latitude",
+                         "koppen_B", "koppen_C", "koppen_D")
+all_vars_ctrl_inner <- c("cgi_score_w",
+                         "precip_mean_w",
+                         "pop_10y_w", "road_density_w",
+                         "longitude", "latitude")
+
+# M1c 控制变量：去掉人口，保留降水+道路密度
+nopop_ctrl_all   <- c("cgi_score_w",
+                      "precip_mean_w", "road_density_w",
+                      "longitude", "latitude",
+                      "koppen_B", "koppen_C", "koppen_D")
+nopop_ctrl_inner <- c("cgi_score_w",
+                      "precip_mean_w", "road_density_w",
+                      "longitude", "latitude")
+
+# M1. 有序Logit（基础版）：仅地理+Köppen控制，分促进/抑制组
+olr_rg_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") ctrl_all else ctrl_inner
+    result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# M1b. 有序Logit（全变量版）：加入 local + bg 所有变量作为控制
+olr_rg_full_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") all_vars_ctrl_all else all_vars_ctrl_inner
+    result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+if (nrow(olr_rg_tbl) > 0) {
+  cat("\n--- M1. 有序Logit（分促进/抑制）---\n")
+  print(olr_rg_tbl %>%
+          filter(variable %in% c("inv_w", "cgi_score_w")) %>%
+          dplyr::select(response_group, koppen, n, variable, coef, se, p_val, sig))
+
+  write_csv(olr_rg_tbl, file.path(OUT, "olr_response_group_coef.csv"))
+  cat("-> olr_response_group_coef.csv\n")
+
+  # 森林图：促进 vs 抑制，分气候区（M1基础版）
+  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                  C = "C(温带)", D = "D(大陆)")
+  m1_vars_display <- c("inv_w", "cgi_score_w")
+  m1_var_label_map <- c(inv_w = "投资强度", cgi_score_w = "CGI治理指数")
+  p_olr_rg <- olr_rg_tbl %>%
+    filter(variable %in% m1_vars_display) %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen],
+                          levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)]),
+      var_label2 = factor(m1_var_label_map[variable],
+                          levels = rev(m1_var_label_map[m1_vars_display])),
+      sig_alpha  = ifelse(p_val < 0.05, 1, 0.4)
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = coef, y = var_label2,
+               color = response_group, alpha = sig_alpha)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
+                   height = 0.3, linewidth = 0.6,
+                   position = position_dodge(0.6)) +
+    geom_point(size = 2.5, shape = 18,
+               position = position_dodge(0.6)) +
+    scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                       name = "响应类型") +
+    scale_alpha_identity() +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = "M1 有序Logit系数：促进组 vs 抑制组（基础控制）",
+         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
+                           "自变量：投资强度（pa_built_10y）、CGI治理指数\n",
+                           "控制变量：经度、纬度、Köppen气候区\n",
+                           "实心=p<0.05，透明=p≥0.05；误差线为95%CI"),
+         x = "系数（95% CI）", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "olr_response_group.png"),
+         p_olr_rg, width = 12, height = 5, dpi = 300)
+  cat("-> olr_response_group.png\n")
+}
+
+# M1b 输出
+mgmt_vars_display <- c("inv_w", "cgi_score_w")
+all_vars_display  <- c("inv_w", "cgi_score_w",
+                       "precip_mean_w",
+                       "pop_10y_w", "road_density_w")
+
+var_label_map <- c(
+  inv_w            = "投资强度",
+  cgi_score_w      = "CGI治理指数",
+  precip_mean_w    = "降水量",
+  soil_clay_w      = "土壤黏粒",
+  soil_sand_w      = "土壤砂粒",
+  pop_10y_w        = "常住人口",
+  road_density_w   = "道路密度"
+)
+
+if (nrow(olr_rg_full_tbl) > 0) {
+  cat("\n--- M1b. 有序Logit（全变量）：分促进/抑制组 ---\n")
+  print(olr_rg_full_tbl %>%
+          filter(variable %in% mgmt_vars_display, koppen == "ALL") %>%
+          dplyr::select(response_group, koppen, n, mcfadden,
+                        variable, coef, se, p_val, sig))
+
+  write_csv(olr_rg_full_tbl, file.path(OUT, "olr_response_group_fullvar_coef.csv"))
+  cat("-> olr_response_group_fullvar_coef.csv\n")
+
+  # Forest plot：全变量版，展示所有7个关键变量系数（全国ALL）
+  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                  C = "C(温带)", D = "D(大陆)")
+
+  p_forest_full <- olr_rg_full_tbl %>%
+    filter(variable %in% all_vars_display) %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen],
+                          levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)]),
+      var_label2 = factor(var_label_map[variable],
+                          levels = rev(var_label_map[all_vars_display])),
+      sig_alpha  = ifelse(p_val < 0.05, 1, 0.4),
+      is_mgmt    = variable %in% mgmt_vars_display
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = coef, y = var_label2,
+               color = response_group, alpha = sig_alpha)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
+                   height = 0.3, linewidth = 0.6,
+                   position = position_dodge(0.6)) +
+    geom_point(aes(shape = is_mgmt), size = 2.5,
+               position = position_dodge(0.6)) +
+    scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                       name = "响应类型") +
+    scale_shape_manual(values = c(`TRUE` = 18, `FALSE` = 16),
+                       labels = c(`TRUE` = "管理变量", `FALSE` = "控制变量"),
+                       name = "变量类型") +
+    scale_alpha_identity() +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = "M1b 有序Logit系数（全变量）：促进组 vs 抑制组",
+         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
+                           "管理变量：投资强度、CGI治理指数（◆）\n",
+                           "控制变量：降水量、常住人口、道路密度（●）+ 经度、纬度、Köppen气候区\n",
+                           "实心=p<0.05，透明=p≥0.05；误差线为95%CI"),
+         x = "系数（95% CI）", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "olr_response_group_fullvar.png"),
+         p_forest_full, width = 14, height = 6, dpi = 300)
+  cat("-> olr_response_group_fullvar.png\n")
+}
+
+# M1c. 有序Logit（去掉人口版）：降水 + 道路密度，不含人口
+nopop_vars_display <- c("inv_w", "cgi_score_w",
+                        "precip_mean_w", "road_density_w")
+
+olr_rg_nopop_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") nopop_ctrl_all else nopop_ctrl_inner
+    result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+vp_rg_nonpop_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    result <- run_vp3(df_g, "TRRI_g", mgmt_vars, local_vars, "road_density_w", grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+if (nrow(olr_rg_nopop_tbl) > 0) {
+  cat("\n--- M1c. 有序Logit（去掉人口）：分促进/抑制组 ---\n")
+  print(olr_rg_nopop_tbl %>%
+          filter(variable %in% c("inv_w", "cgi_score_w"), koppen == "ALL") %>%
+          dplyr::select(response_group, koppen, n, mcfadden,
+                        variable, coef, se, p_val, sig))
+
+  write_csv(olr_rg_nopop_tbl, file.path(OUT, "olr_response_group_nopop_coef.csv"))
+  cat("-> olr_response_group_nopop_coef.csv\n")
+
+  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                  C = "C(温带)", D = "D(大陆)")
+
+  p_forest_nopop <- olr_rg_nopop_tbl %>%
+    filter(variable %in% nopop_vars_display) %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen],
+                          levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)]),
+      var_label2 = factor(var_label_map[variable],
+                          levels = rev(var_label_map[nopop_vars_display])),
+      sig_alpha  = ifelse(p_val < 0.05, 1, 0.4),
+      is_mgmt    = variable %in% mgmt_vars_display
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = coef, y = var_label2,
+               color = response_group, alpha = sig_alpha)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
+                   height = 0.3, linewidth = 0.6,
+                   position = position_dodge(0.6)) +
+    geom_point(aes(shape = is_mgmt), size = 2.5,
+               position = position_dodge(0.6)) +
+    scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                       name = "响应类型") +
+    scale_shape_manual(values = c(`TRUE` = 18, `FALSE` = 16),
+                       labels = c(`TRUE` = "管理变量", `FALSE` = "控制变量"),
+                       name = "变量类型") +
+    scale_alpha_identity() +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = "M1c 有序Logit系数（去掉人口）：促进组 vs 抑制组",
+         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
+                           "管理变量：投资强度、CGI治理指数（◆）\n",
+                           "控制变量：降水量、道路密度（●）+ 经度、纬度、Köppen气候区（不含人口）\n",
+                           "实心=p<0.05，透明=p≥0.05；误差线为95%CI"),
+         x = "系数（95% CI）", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "olr_response_group_nopop.png"),
+         p_forest_nopop, width = 14, height = 5, dpi = 300)
+  cat("-> olr_response_group_nopop.png\n")
+  
+  p_vp_rg_nonpop <- vp_rg_nonpop_tbl %>%
+    mutate(grp_label = factor(
+      paste0(koppen_nm2[koppen], "\n(", response_group, ")"),
+      levels = level_grid
+    )) %>%
+    filter(!is.na(grp_label)) %>%
+    pivot_longer(c(mgmt_only, local_only, bg_only),
+                 names_to = "component", values_to = "r2") %>%
+    mutate(
+      r2_show    = pmax(r2, 0),
+      comp_label = factor(component,
+                          levels = c("mgmt_only", "local_only", "bg_only"),
+                          labels = c("管理", "Local", "背景"))
+    ) %>%
+    ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
+    geom_col(position = "dodge", width = 0.7, alpha = 0.85) +
+    geom_text(aes(label = sprintf("%.1f%%", r2_show)),
+              position = position_dodge(0.7), vjust = -0.4,
+              size = 2.8, family = "heiti") +
+    scale_fill_manual(
+      values = c("管理" = "#D73027", "Local" = "#2CA25F", "背景" = "#4575B4"),
+      name = "变量组") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+    labs(title    = "方差分解：促进组 vs 抑制组（分气候区）",
+         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
+                           "管理 = 投资强度 + CGI治理指数；Local = 降水量；背景 = 道路密度\n",
+                           "（负值显示为0）"),
+         x = NULL, y = "独立调整R²（%）") +
+    theme_cn() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(size = 9))
+  
+  ggsave(file.path(OUT, "varpart_response_group_nonpop.png"),
+         p_vp_rg_nonpop, width = 14, height = 5, dpi = 300)
+}
+
+# M2. 方差分解：分促进/抑制组
+vp_rg_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    result <- run_vp3(df_g, "TRRI_g", mgmt_vars, local_vars, bg_vars, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+if (nrow(vp_rg_tbl) > 0) {
+  cat("\n--- M2. 方差分解（分促进/抑制）---\n")
+  print(vp_rg_tbl %>%
+          dplyr::select(response_group, koppen, n, mgmt_only, local_only,
+                        bg_only, unexplained))
+
+  write_csv(vp_rg_tbl, file.path(OUT, "varpart_response_group.csv"))
+  cat("-> varpart_response_group.csv\n")
+
+  # 并排比较图
+  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                  C = "C(温带)", D = "D(大陆)")
+  koppen_order <- intersect(c("ALL","A","B","C","D"), unique(vp_rg_tbl$koppen))
+  level_grid   <- as.vector(outer(koppen_nm2[koppen_order], group_labels,
+                                  function(k, g) paste0(k, "\n(", g, ")")))
+  p_vp_rg <- vp_rg_tbl %>%
+    mutate(grp_label = factor(
+      paste0(koppen_nm2[koppen], "\n(", response_group, ")"),
+      levels = level_grid
+    )) %>%
+    filter(!is.na(grp_label)) %>%
+    pivot_longer(c(mgmt_only, local_only, bg_only),
+                 names_to = "component", values_to = "r2") %>%
+    mutate(
+      r2_show    = pmax(r2, 0),
+      comp_label = factor(component,
+                          levels = c("mgmt_only", "local_only", "bg_only"),
+                          labels = c("管理", "Local", "背景"))
+    ) %>%
+    ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
+    geom_col(position = "dodge", width = 0.7, alpha = 0.85) +
+    geom_text(aes(label = sprintf("%.1f%%", r2_show)),
+              position = position_dodge(0.7), vjust = -0.4,
+              size = 2.8, family = "heiti") +
+    scale_fill_manual(
+      values = c("管理" = "#D73027", "Local" = "#2CA25F", "背景" = "#4575B4"),
+      name = "变量组") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
+    labs(title    = "方差分解：促进组 vs 抑制组（分气候区）",
+         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
+                           "管理 = 投资强度 + CGI治理指数；Local = 降水量；背景 = 常住人口 + 道路密度\n",
+                           "（负值显示为0）"),
+         x = NULL, y = "独立调整R²（%）") +
+    theme_cn() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(size = 9))
+
+  ggsave(file.path(OUT, "varpart_response_group.png"),
+         p_vp_rg, width = 14, height = 5, dpi = 300)
+  cat("-> varpart_response_group.png\n")
 }
 
 
