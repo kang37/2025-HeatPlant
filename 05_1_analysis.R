@@ -460,6 +460,55 @@ if (any(!is.na(road_df$road_density))) {
 
 
 # =============================================================================
+# E6. 建筑占地面积（王琳提供，站点30m缓冲区内建筑footprint，单位m²）
+# =============================================================================
+
+cat("\n=== E6. 建筑占地面积（王琳数据）===\n")
+
+building_df <- read_csv(
+  "data_raw/China_stations_buildings_with_coords30_local_rerun_filled.csv",
+  show_col_types = FALSE
+) %>%
+  transmute(
+    meteo_stat_id    = as.character(AirQualityStation),
+    building_footprint = as.numeric(buildingFootprint)
+  )
+
+cat(sprintf("  建筑数据：%d 个站点，非NA: %d，正值: %d，零值: %d\n",
+            nrow(building_df),
+            sum(!is.na(building_df$building_footprint)),
+            sum(building_df$building_footprint > 0, na.rm = TRUE),
+            sum(building_df$building_footprint == 0, na.rm = TRUE)))
+cat(sprintf("  范围: %.2f ~ %.2f m²，均值: %.2f m²\n",
+            min(building_df$building_footprint, na.rm = TRUE),
+            max(building_df$building_footprint, na.rm = TRUE),
+            mean(building_df$building_footprint, na.rm = TRUE)))
+
+
+# =============================================================================
+# E7. 建筑平均高度（CMAB数据集，站点30m缓冲区内面积加权平均，单位m）
+# 与E6的building_footprint结合计算建筑体积密度（方案A）
+# =============================================================================
+
+cat("\n=== E7. 建筑平均高度（CMAB）===\n")
+
+HEIGHT_CACHE <- "data_raw/building_height_station.rds"
+BUFFER_AREA_M2 <- pi * 30^2  # 30m缓冲区面积（m²）≈ 2827 m²
+
+if (file.exists(HEIGHT_CACHE)) {
+  height_df <- readRDS(HEIGHT_CACHE) %>%
+    mutate(meteo_stat_id = as.character(meteo_stat_id))
+  cat(sprintf("  建筑高度：%d 个站点，height > 0: %d\n",
+              nrow(height_df), sum(height_df$mean_height > 0, na.rm = TRUE)))
+  cat(sprintf("  高度范围: %.1f ~ %.1f m\n",
+              min(height_df$mean_height[height_df$mean_height > 0], na.rm = TRUE),
+              max(height_df$mean_height, na.rm = TRUE)))
+} else {
+  cat("  [警告] building_height_station.rds 不存在，请先运行 12_building_height.R\n")
+  height_df <- tibble(meteo_stat_id = character(), mean_height = numeric(), n_buildings = integer())
+}
+
+# =============================================================================
 # F. 合并分析数据框（仅站点级）
 # =============================================================================
 
@@ -471,6 +520,8 @@ anal_df <- trri_df %>%
   left_join(soil_df,         by = "meteo_stat_id") %>%
   left_join(dplyr::select(road_df, meteo_stat_id, road_density),
                            by = "meteo_stat_id") %>%
+  left_join(building_df,     by = "meteo_stat_id") %>%
+  left_join(height_df,       by = "meteo_stat_id") %>%
   # 城市级背景变量（通过city_name连接）
   left_join(city_pop,        by = "city_name") %>%
   filter(!is.na(TRRI), !is.na(longitude), !is.na(latitude),
@@ -487,8 +538,14 @@ anal_df <- trri_df %>%
     soil_clay_w      = winsorize(soil_clay),
     soil_sand_w      = winsorize(soil_sand),
     # 背景变量
-    pop_10y_w          = winsorize(pop_10y),
-    road_density_w     = winsorize(road_density),
+    pop_10y_w            = winsorize(pop_10y),
+    road_density_w       = winsorize(road_density),
+    building_footprint_w = winsorize(building_footprint),
+    # 建筑体积密度（方案A）：footprint × 平均高度 / 缓冲区面积（m³/m²）
+    building_volume      = replace_na(building_footprint, 0) *
+                           replace_na(mean_height, 0),
+    building_vol_density = building_volume / BUFFER_AREA_M2,
+    building_vol_density_w = winsorize(building_vol_density),
     # 旧变量保留（兼容）
     pgdp_10y_w       = winsorize(pgdp_10y),
     TRRI_ord         = factor(TRRI, levels = 1:TRRI_MAX, ordered = TRUE),
@@ -501,7 +558,10 @@ cat(sprintf("cgi_score 非NA: %d\n",       sum(!is.na(anal_df$cgi_score))))
 cat(sprintf("precip_mean 非NA: %d\n",     sum(!is.na(anal_df$precip_mean))))
 cat(sprintf("soil_clay 非NA: %d\n",       sum(!is.na(anal_df$soil_clay))))
 cat(sprintf("pop_10y 非NA: %d\n",         sum(!is.na(anal_df$pop_10y))))
-cat(sprintf("road_density 非NA: %d\n",    sum(!is.na(anal_df$road_density))))
+cat(sprintf("road_density 非NA: %d\n",          sum(!is.na(anal_df$road_density))))
+cat(sprintf("building_footprint 非NA: %d\n",   sum(!is.na(anal_df$building_footprint))))
+cat(sprintf("mean_height > 0: %d\n",           sum(anal_df$mean_height > 0, na.rm = TRUE)))
+cat(sprintf("building_vol_density > 0: %d\n",  sum(anal_df$building_vol_density > 0, na.rm = TRUE)))
 cat("气候组分布:\n"); print(count(anal_df, koppen_group))
 
 # 城市级（仅用于G3热图，不做回归）
@@ -1446,7 +1506,7 @@ cat("\n=== K. 方差分解（三组）===\n")
 
 mgmt_vars  <- c("pa_built_10y_w", "cgi_score_w")
 local_vars <- c("precip_mean_w")
-bg_vars    <- c("pop_10y_w", "road_density_w")
+bg_vars    <- c("pop_10y_w", "road_density_w", "building_footprint_w")
 
 run_vp3 <- function(df, outcome_var, mv, lv, bv, grp_label) {
   req_vars <- c(mv, lv, bv)
@@ -1550,11 +1610,11 @@ if (nrow(vp_tbl) > 0) {
                  "[c] 背景（独立）"="#4575B4", "[d] 未解释/共享"="#CCCCCC"),
       name = "方差分量") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
-    labs(title    = "方差分解（三组）：管理 vs Local vs 背景",
-         subtitle = paste0("因变量：TRRI（全样本，1–18）\n",
-                           "[a] 管理 = 投资强度（pa_built_10y）+ CGI治理指数\n",
-                           "[b] Local = 降水量；[c] 背景 = 常住人口 + 道路密度\n",
-                           "调整R²独立分量（负值显示为0）"),
+    labs(title    = "Variance Partitioning (3 Groups): Mgmt vs Local vs Background",
+         subtitle = paste0("Outcome: TRRI (all stations, 1–18)\n",
+                           "[a] Mgmt = Investment (pa_built_10y) + CGI Governance\n",
+                           "[b] Local = Precipitation; [c] Background = Population + Road Density + Building Footprint (2D)\n",
+                           "Adj. R² unique fractions (negative shown as 0)"),
          x = NULL, y = "调整R²（%）") +
     theme_cn() +
     theme(legend.position = "right")
@@ -1583,10 +1643,10 @@ if (nrow(vp_tbl) > 0) {
       values = c("管理"="#D73027","Local"="#2CA25F","背景"="#4575B4"),
       name = "变量组") +
     scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
-    labs(title    = "方差分解：各组独立解释力比较（分气候区）",
-         subtitle = paste0("因变量：TRRI（全样本，1–18）\n",
-                           "管理 = 投资强度 + CGI；Local = 降水量；背景 = 常住人口 + 道路密度\n",
-                           "（负值代表独立贡献低于随机水平，显示为0）"),
+    labs(title    = "Variance Partitioning: Unique Fractions by Climate Zone",
+         subtitle = paste0("Outcome: TRRI (all stations, 1–18)\n",
+                           "Mgmt = Investment + CGI; Local = Precipitation; Background = Population + Road Density + Building Footprint (2D)\n",
+                           "(negative = unique contribution below random, shown as 0)"),
          x = NULL, y = "独立调整R²（%）") +
     theme_cn() +
     theme(legend.position = "right")
@@ -1794,25 +1854,27 @@ run_olr_group <- function(df, inv_var, ctrl_vars, grp_label) {
   run_olr_full(df, inv_var, ctrl_vars, grp_label)
 }
 
-# 全变量控制变量（含 local + bg 组所有变量）
+# M1b 控制变量：Full Control (Footprint) — precip + pop + road + 建筑占地面积（2D）
 all_vars_ctrl_all   <- c("cgi_score_w",
                          "precip_mean_w",
-                         "pop_10y_w", "road_density_w",
+                         "pop_10y_w", "road_density_w", "building_footprint_w",
                          "longitude", "latitude",
                          "koppen_B", "koppen_C", "koppen_D")
 all_vars_ctrl_inner <- c("cgi_score_w",
                          "precip_mean_w",
-                         "pop_10y_w", "road_density_w",
+                         "pop_10y_w", "road_density_w", "building_footprint_w",
                          "longitude", "latitude")
 
-# M1c 控制变量：去掉人口，保留降水+道路密度
-nopop_ctrl_all   <- c("cgi_score_w",
-                      "precip_mean_w", "road_density_w",
-                      "longitude", "latitude",
-                      "koppen_B", "koppen_C", "koppen_D")
-nopop_ctrl_inner <- c("cgi_score_w",
-                      "precip_mean_w", "road_density_w",
-                      "longitude", "latitude")
+# M1c 控制变量：Full Control (Volume) — precip + pop + road + 建筑体积密度（3D）
+vol_ctrl_all   <- c("cgi_score_w",
+                    "precip_mean_w",
+                    "pop_10y_w", "road_density_w", "building_vol_density_w",
+                    "longitude", "latitude",
+                    "koppen_B", "koppen_C", "koppen_D")
+vol_ctrl_inner <- c("cgi_score_w",
+                    "precip_mean_w",
+                    "pop_10y_w", "road_density_w", "building_vol_density_w",
+                    "longitude", "latitude")
 
 # M1. 有序Logit（基础版）：仅地理+Köppen控制，分促进/抑制组
 olr_rg_tbl <- map_dfr(group_labels, function(rg) {
@@ -1848,62 +1910,94 @@ if (nrow(olr_rg_tbl) > 0) {
   # 森林图：促进 vs 抑制，分气候区（M1基础版）
   koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
                   C = "C(温带)", D = "D(大陆)")
-  m1_vars_display <- c("inv_w", "cgi_score_w")
-  m1_var_label_map <- c(inv_w = "投资强度", cgi_score_w = "CGI治理指数")
-  p_olr_rg <- olr_rg_tbl %>%
-    filter(variable %in% m1_vars_display) %>%
+  m1_vars_display <- c("inv_w", "cgi_score_w",
+                       "longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
+  m1_var_label_map <- c(
+    inv_w       = "Investment",
+    cgi_score_w = "CGI Governance",
+    longitude   = "Longitude",
+    latitude    = "Latitude",
+    koppen_B    = "Köppen B (Arid)",
+    koppen_C    = "Köppen C (Temperate)",
+    koppen_D    = "Köppen D (Continental)"
+  )
+  m1_is_mgmt <- c(inv_w = TRUE, cgi_score_w = TRUE,
+                  longitude = FALSE, latitude = FALSE,
+                  koppen_B = FALSE, koppen_C = FALSE, koppen_D = FALSE)
+
+  m1_plot_df <- olr_rg_tbl %>% filter(variable %in% m1_vars_display)
+  m1_koppen_order <- intersect(c("ALL","A","B","C","D"), unique(m1_plot_df$koppen))
+  m1_grp_levels   <- koppen_nm2[m1_koppen_order]
+
+  p_olr_rg <- m1_plot_df %>%
     mutate(
-      grp_label  = factor(koppen_nm2[koppen],
-                          levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)]),
+      grp_label  = factor(koppen_nm2[koppen], levels = m1_grp_levels),
       var_label2 = factor(m1_var_label_map[variable],
                           levels = rev(m1_var_label_map[m1_vars_display])),
-      sig_alpha  = ifelse(p_val < 0.05, 1, 0.4)
+      is_mgmt    = m1_is_mgmt[variable],
+      sig        = p_val < 0.05,
+      pt_shape   = case_when(
+        is_mgmt &  sig ~ 18L,   # filled diamond
+        is_mgmt & !sig ~ 5L,    # open diamond
+       !is_mgmt &  sig ~ 16L,   # filled circle
+       !is_mgmt & !sig ~ 1L     # open circle
+      )
     ) %>%
     filter(!is.na(grp_label), !is.na(var_label2)) %>%
-    ggplot(aes(x = coef, y = var_label2,
-               color = response_group, alpha = sig_alpha)) +
+    ggplot(aes(x = coef, y = var_label2, color = response_group)) +
     geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
     geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
                    height = 0.3, linewidth = 0.6,
                    position = position_dodge(0.6)) +
-    geom_point(size = 2.5, shape = 18,
+    geom_point(aes(shape = pt_shape), size = 2.5,
                position = position_dodge(0.6)) +
     scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
-                       name = "响应类型") +
-    scale_alpha_identity() +
+                       name = "Response") +
+    scale_shape_identity(guide = "none") +
     facet_wrap(~grp_label, nrow = 1) +
-    labs(title    = "M1 有序Logit系数：促进组 vs 抑制组（基础控制）",
-         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
-                           "自变量：投资强度（pa_built_10y）、CGI治理指数\n",
-                           "控制变量：经度、纬度、Köppen气候区\n",
-                           "实心=p<0.05，透明=p≥0.05；误差线为95%CI"),
-         x = "系数（95% CI）", y = NULL) +
+    labs(title    = "M1 Basic Model: Promote vs Inhibit Groups",
+         subtitle = paste0("Outcome: TRRI_g (within-group 1–9, 1=worst, 9=best)\n",
+                           "Management: Investment, CGI (◆ filled=sig, ◇ open=ns)\n",
+                           "Controls: Lon/Lat/Köppen (● filled=sig, ○ open=ns); error bars = 95% CI"),
+         x = "Coefficient (95% CI)", y = NULL) +
     theme_cn() +
     theme(legend.position = "right")
 
   ggsave(file.path(OUT, "olr_response_group.png"),
-         p_olr_rg, width = 12, height = 5, dpi = 300)
+         p_olr_rg, width = 14, height = 6, dpi = 300)
   cat("-> olr_response_group.png\n")
 }
 
-# M1b 输出
+# M1b 输出（Full Control - Footprint）
 mgmt_vars_display <- c("inv_w", "cgi_score_w")
 all_vars_display  <- c("inv_w", "cgi_score_w",
                        "precip_mean_w",
-                       "pop_10y_w", "road_density_w")
+                       "pop_10y_w", "road_density_w", "building_footprint_w",
+                       "longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
+vol_vars_display  <- c("inv_w", "cgi_score_w",
+                       "precip_mean_w",
+                       "pop_10y_w", "road_density_w", "building_vol_density_w",
+                       "longitude", "latitude", "koppen_B", "koppen_C", "koppen_D")
 
 var_label_map <- c(
-  inv_w            = "投资强度",
-  cgi_score_w      = "CGI治理指数",
-  precip_mean_w    = "降水量",
-  soil_clay_w      = "土壤黏粒",
-  soil_sand_w      = "土壤砂粒",
-  pop_10y_w        = "常住人口",
-  road_density_w   = "道路密度"
+  inv_w                  = "Investment",
+  cgi_score_w            = "CGI Governance",
+  precip_mean_w          = "Precipitation",
+  soil_clay_w            = "Soil Clay",
+  soil_sand_w            = "Soil Sand",
+  pop_10y_w              = "Population",
+  road_density_w         = "Road Density",
+  building_footprint_w   = "Building Footprint (2D)",
+  building_vol_density_w = "Building Volume Density (3D)",
+  longitude              = "Longitude",
+  latitude               = "Latitude",
+  koppen_B               = "Köppen B (Arid)",
+  koppen_C               = "Köppen C (Temperate)",
+  koppen_D               = "Köppen D (Continental)"
 )
 
 if (nrow(olr_rg_full_tbl) > 0) {
-  cat("\n--- M1b. 有序Logit（全变量）：分促进/抑制组 ---\n")
+  cat("\n--- M1b. Full Control (Footprint): Promote vs Inhibit ---\n")
   print(olr_rg_full_tbl %>%
           filter(variable %in% mgmt_vars_display, koppen == "ALL") %>%
           dplyr::select(response_group, koppen, n, mcfadden,
@@ -1916,158 +2010,130 @@ if (nrow(olr_rg_full_tbl) > 0) {
   koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
                   C = "C(温带)", D = "D(大陆)")
 
-  p_forest_full <- olr_rg_full_tbl %>%
-    filter(variable %in% all_vars_display) %>%
+  full_plot_df <- olr_rg_full_tbl %>% filter(variable %in% all_vars_display)
+  full_koppen_order <- intersect(c("ALL","A","B","C","D"), unique(full_plot_df$koppen))
+  full_grp_levels   <- koppen_nm2[full_koppen_order]
+
+  p_forest_full <- full_plot_df %>%
     mutate(
-      grp_label  = factor(koppen_nm2[koppen],
-                          levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)]),
+      grp_label  = factor(koppen_nm2[koppen], levels = full_grp_levels),
       var_label2 = factor(var_label_map[variable],
                           levels = rev(var_label_map[all_vars_display])),
-      sig_alpha  = ifelse(p_val < 0.05, 1, 0.4),
-      is_mgmt    = variable %in% mgmt_vars_display
+      is_mgmt    = variable %in% mgmt_vars_display,
+      sig        = p_val < 0.05,
+      pt_shape   = case_when(
+        is_mgmt &  sig ~ 18L,
+        is_mgmt & !sig ~ 5L,
+       !is_mgmt &  sig ~ 16L,
+       !is_mgmt & !sig ~ 1L
+      )
     ) %>%
     filter(!is.na(grp_label), !is.na(var_label2)) %>%
-    ggplot(aes(x = coef, y = var_label2,
-               color = response_group, alpha = sig_alpha)) +
+    ggplot(aes(x = coef, y = var_label2, color = response_group)) +
     geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
     geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
                    height = 0.3, linewidth = 0.6,
                    position = position_dodge(0.6)) +
-    geom_point(aes(shape = is_mgmt), size = 2.5,
+    geom_point(aes(shape = pt_shape), size = 2.5,
                position = position_dodge(0.6)) +
     scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
-                       name = "响应类型") +
-    scale_shape_manual(values = c(`TRUE` = 18, `FALSE` = 16),
-                       labels = c(`TRUE` = "管理变量", `FALSE` = "控制变量"),
-                       name = "变量类型") +
-    scale_alpha_identity() +
+                       name = "Response") +
+    scale_shape_identity(guide = "none") +
     facet_wrap(~grp_label, nrow = 1) +
-    labs(title    = "M1b 有序Logit系数（全变量）：促进组 vs 抑制组",
-         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
-                           "管理变量：投资强度、CGI治理指数（◆）\n",
-                           "控制变量：降水量、常住人口、道路密度（●）+ 经度、纬度、Köppen气候区\n",
-                           "实心=p<0.05，透明=p≥0.05；误差线为95%CI"),
-         x = "系数（95% CI）", y = NULL) +
+    labs(title    = "M1b Full Control (Footprint): Promote vs Inhibit Groups",
+         subtitle = paste0("Outcome: TRRI_g (within-group 1–9, 1=worst, 9=best)\n",
+                           "Management: Investment, CGI (◆ filled=sig, ◇ open=ns)\n",
+                           "Controls: Precip, Pop, Road, Footprint 2D, Lon/Lat/Köppen (● filled=sig, ○ open=ns); error bars = 95% CI"),
+         x = "Coefficient (95% CI)", y = NULL) +
     theme_cn() +
     theme(legend.position = "right")
 
   ggsave(file.path(OUT, "olr_response_group_fullvar.png"),
-         p_forest_full, width = 14, height = 6, dpi = 300)
+         p_forest_full, width = 14, height = 8, dpi = 300)
   cat("-> olr_response_group_fullvar.png\n")
 }
 
-# M1c. 有序Logit（去掉人口版）：降水 + 道路密度，不含人口
-nopop_vars_display <- c("inv_w", "cgi_score_w",
-                        "precip_mean_w", "road_density_w")
-
+# M1c. Full Control (Volume)：与M1b相同结构，但用建筑体积密度（3D）代替占地面积（2D）
 olr_rg_nopop_tbl <- map_dfr(group_labels, function(rg) {
   df_rg <- filter(anal_df, response_group == rg)
   map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
     df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
-    ctrl_v <- if (grp == "ALL") nopop_ctrl_all else nopop_ctrl_inner
+    ctrl_v <- if (grp == "ALL") vol_ctrl_all else vol_ctrl_inner
     result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
     if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
   })
 })
 
+bg_vars_vol <- c("pop_10y_w", "road_density_w", "building_vol_density_w")  # M1c背景变量
+
 vp_rg_nonpop_tbl <- map_dfr(group_labels, function(rg) {
   df_rg <- filter(anal_df, response_group == rg)
   map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
     df_g <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
-    result <- run_vp3(df_g, "TRRI_g", mgmt_vars, local_vars, "road_density_w", grp)
+    result <- run_vp3(df_g, "TRRI_g", mgmt_vars, local_vars, bg_vars_vol, grp)
     if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
   })
 })
 
 if (nrow(olr_rg_nopop_tbl) > 0) {
-  cat("\n--- M1c. 有序Logit（去掉人口）：分促进/抑制组 ---\n")
+  cat("\n--- M1c. Full Control (Volume): Promote vs Inhibit ---\n")
   print(olr_rg_nopop_tbl %>%
           filter(variable %in% c("inv_w", "cgi_score_w"), koppen == "ALL") %>%
           dplyr::select(response_group, koppen, n, mcfadden,
                         variable, coef, se, p_val, sig))
 
-  write_csv(olr_rg_nopop_tbl, file.path(OUT, "olr_response_group_nopop_coef.csv"))
-  cat("-> olr_response_group_nopop_coef.csv\n")
+  write_csv(olr_rg_nopop_tbl, file.path(OUT, "olr_response_group_vol_coef.csv"))
+  cat("-> olr_response_group_vol_coef.csv\n")
 
   koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
                   C = "C(温带)", D = "D(大陆)")
 
-  p_forest_nopop <- olr_rg_nopop_tbl %>%
-    filter(variable %in% nopop_vars_display) %>%
+  vol_plot_df <- olr_rg_nopop_tbl %>% filter(variable %in% vol_vars_display)
+  vol_koppen_order <- intersect(c("ALL","A","B","C","D"), unique(vol_plot_df$koppen))
+  vol_grp_levels   <- koppen_nm2[vol_koppen_order]
+
+  p_forest_nopop <- vol_plot_df %>%
     mutate(
-      grp_label  = factor(koppen_nm2[koppen],
-                          levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)]),
+      grp_label  = factor(koppen_nm2[koppen], levels = vol_grp_levels),
       var_label2 = factor(var_label_map[variable],
-                          levels = rev(var_label_map[nopop_vars_display])),
-      sig_alpha  = ifelse(p_val < 0.05, 1, 0.4),
-      is_mgmt    = variable %in% mgmt_vars_display
+                          levels = rev(var_label_map[vol_vars_display])),
+      is_mgmt    = variable %in% mgmt_vars_display,
+      sig        = p_val < 0.05,
+      pt_shape   = case_when(
+        is_mgmt &  sig ~ 18L,
+        is_mgmt & !sig ~ 5L,
+       !is_mgmt &  sig ~ 16L,
+       !is_mgmt & !sig ~ 1L
+      )
     ) %>%
     filter(!is.na(grp_label), !is.na(var_label2)) %>%
-    ggplot(aes(x = coef, y = var_label2,
-               color = response_group, alpha = sig_alpha)) +
+    ggplot(aes(x = coef, y = var_label2, color = response_group)) +
     geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
     geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
                    height = 0.3, linewidth = 0.6,
                    position = position_dodge(0.6)) +
-    geom_point(aes(shape = is_mgmt), size = 2.5,
+    geom_point(aes(shape = pt_shape), size = 2.5,
                position = position_dodge(0.6)) +
     scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
-                       name = "响应类型") +
-    scale_shape_manual(values = c(`TRUE` = 18, `FALSE` = 16),
-                       labels = c(`TRUE` = "管理变量", `FALSE` = "控制变量"),
-                       name = "变量类型") +
-    scale_alpha_identity() +
+                       name = "Response") +
+    scale_shape_identity(guide = "none") +
     facet_wrap(~grp_label, nrow = 1) +
-    labs(title    = "M1c 有序Logit系数（去掉人口）：促进组 vs 抑制组",
-         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
-                           "管理变量：投资强度、CGI治理指数（◆）\n",
-                           "控制变量：降水量、道路密度（●）+ 经度、纬度、Köppen气候区（不含人口）\n",
-                           "实心=p<0.05，透明=p≥0.05；误差线为95%CI"),
-         x = "系数（95% CI）", y = NULL) +
+    labs(title    = "M1c Full Control (Volume): Promote vs Inhibit Groups",
+         subtitle = paste0("Outcome: TRRI_g (within-group 1–9, 1=worst, 9=best)\n",
+                           "Management: Investment, CGI (◆ filled=sig, ◇ open=ns)\n",
+                           "Controls: Precip, Pop, Road, Vol.Density 3D, Lon/Lat/Köppen (● filled=sig, ○ open=ns); error bars = 95% CI"),
+         x = "Coefficient (95% CI)", y = NULL) +
     theme_cn() +
     theme(legend.position = "right")
 
-  ggsave(file.path(OUT, "olr_response_group_nopop.png"),
-         p_forest_nopop, width = 14, height = 5, dpi = 300)
-  cat("-> olr_response_group_nopop.png\n")
+  ggsave(file.path(OUT, "olr_response_group_vol.png"),
+         p_forest_nopop, width = 14, height = 8, dpi = 300)
+  cat("-> olr_response_group_vol.png\n")
   
-  p_vp_rg_nonpop <- vp_rg_nonpop_tbl %>%
-    mutate(grp_label = factor(
-      paste0(koppen_nm2[koppen], "\n(", response_group, ")"),
-      levels = level_grid
-    )) %>%
-    filter(!is.na(grp_label)) %>%
-    pivot_longer(c(mgmt_only, local_only, bg_only),
-                 names_to = "component", values_to = "r2") %>%
-    mutate(
-      r2_show    = pmax(r2, 0),
-      comp_label = factor(component,
-                          levels = c("mgmt_only", "local_only", "bg_only"),
-                          labels = c("管理", "Local", "背景"))
-    ) %>%
-    ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
-    geom_col(position = "dodge", width = 0.7, alpha = 0.85) +
-    geom_text(aes(label = sprintf("%.1f%%", r2_show)),
-              position = position_dodge(0.7), vjust = -0.4,
-              size = 2.8, family = "heiti") +
-    scale_fill_manual(
-      values = c("管理" = "#D73027", "Local" = "#2CA25F", "背景" = "#4575B4"),
-      name = "变量组") +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
-    labs(title    = "方差分解：促进组 vs 抑制组（分气候区）",
-         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
-                           "管理 = 投资强度 + CGI治理指数；Local = 降水量；背景 = 道路密度\n",
-                           "（负值显示为0）"),
-         x = NULL, y = "独立调整R²（%）") +
-    theme_cn() +
-    theme(legend.position = "right",
-          axis.text.x = element_text(size = 9))
-  
-  ggsave(file.path(OUT, "varpart_response_group_nonpop.png"),
-         p_vp_rg_nonpop, width = 14, height = 5, dpi = 300)
+  # M1c varpart plot saved below in combined section
 }
 
-# M2. 方差分解：分促进/抑制组
+# M2. 方差分解：分促进/抑制组（M1b: footprint；已在上面M1c section中做了vol版本）
 vp_rg_tbl <- map_dfr(group_labels, function(rg) {
   df_rg <- filter(anal_df, response_group == rg)
   map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
@@ -2078,57 +2144,224 @@ vp_rg_tbl <- map_dfr(group_labels, function(rg) {
 })
 
 if (nrow(vp_rg_tbl) > 0) {
-  cat("\n--- M2. 方差分解（分促进/抑制）---\n")
+  cat("\n--- M2. Variance Partitioning (Promote / Inhibit, M1b footprint + M1c volume) ---\n")
   print(vp_rg_tbl %>%
           dplyr::select(response_group, koppen, n, mgmt_only, local_only,
-                        bg_only, unexplained))
+                        bg_only, mgmt_local, mgmt_bg, local_bg, triple, unexplained))
 
   write_csv(vp_rg_tbl, file.path(OUT, "varpart_response_group.csv"))
   cat("-> varpart_response_group.csv\n")
+  if (nrow(vp_rg_nonpop_tbl) > 0)
+    write_csv(vp_rg_nonpop_tbl, file.path(OUT, "varpart_response_group_vol.csv"))
 
-  # 并排比较图
-  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
-                  C = "C(温带)", D = "D(大陆)")
-  koppen_order <- intersect(c("ALL","A","B","C","D"), unique(vp_rg_tbl$koppen))
-  level_grid   <- as.vector(outer(koppen_nm2[koppen_order], group_labels,
-                                  function(k, g) paste0(k, "\n(", g, ")")))
-  p_vp_rg <- vp_rg_tbl %>%
-    mutate(grp_label = factor(
-      paste0(koppen_nm2[koppen], "\n(", response_group, ")"),
-      levels = level_grid
-    )) %>%
-    filter(!is.na(grp_label)) %>%
-    pivot_longer(c(mgmt_only, local_only, bg_only),
-                 names_to = "component", values_to = "r2") %>%
-    mutate(
-      r2_show    = pmax(r2, 0),
-      comp_label = factor(component,
-                          levels = c("mgmt_only", "local_only", "bg_only"),
-                          labels = c("管理", "Local", "背景"))
-    ) %>%
-    ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
-    geom_col(position = "dodge", width = 0.7, alpha = 0.85) +
-    geom_text(aes(label = sprintf("%.1f%%", r2_show)),
-              position = position_dodge(0.7), vjust = -0.4,
-              size = 2.8, family = "heiti") +
-    scale_fill_manual(
-      values = c("管理" = "#D73027", "Local" = "#2CA25F", "背景" = "#4575B4"),
-      name = "变量组") +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.3))) +
-    labs(title    = "方差分解：促进组 vs 抑制组（分气候区）",
-         subtitle = paste0("因变量：TRRI_g（组内1–9，1=最差，9=最好）\n",
-                           "管理 = 投资强度 + CGI治理指数；Local = 降水量；背景 = 常住人口 + 道路密度\n",
-                           "（负值显示为0）"),
-         x = NULL, y = "独立调整R²（%）") +
-    theme_cn() +
-    theme(legend.position = "right",
-          axis.text.x = element_text(size = 9))
+  # ── helper: build full-fraction stacked bar for one varpart table ──────────
+  vp_comp_cols  <- c("mgmt_only","local_only","bg_only",
+                     "mgmt_local","mgmt_bg","local_bg","triple","unexplained")
+  vp_comp_labels <- c("Mgmt (unique)","Local (unique)","Background (unique)",
+                      "Mgmt ∩ Local","Mgmt ∩ Background","Local ∩ Background",
+                      "All Three","Unexplained")
+  vp_comp_colors <- c(
+    "Mgmt (unique)"       = "#D73027",
+    "Local (unique)"      = "#2CA25F",
+    "Background (unique)" = "#4575B4",
+    "Mgmt ∩ Local"        = "#FC8D59",
+    "Mgmt ∩ Background"   = "#984EA3",
+    "Local ∩ Background"  = "#2CAAAA",
+    "All Three"           = "#4D4D4D",
+    "Unexplained"         = "#CCCCCC"
+  )
+
+  make_vp_plot <- function(vp_df, title_str, subtitle_str) {
+    koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                    C = "C(温带)", D = "D(大陆)")
+    ko  <- intersect(c("ALL","A","B","C","D"), unique(vp_df$koppen))
+    lvl <- as.vector(outer(koppen_nm2[ko], group_labels,
+                           function(k, g) paste0(k, "\n(", g, ")")))
+    vp_df %>%
+      mutate(grp_label = factor(
+        paste0(koppen_nm2[koppen], "\n(", response_group, ")"), levels = lvl)) %>%
+      filter(!is.na(grp_label)) %>%
+      pivot_longer(all_of(vp_comp_cols), names_to = "component", values_to = "r2") %>%
+      mutate(
+        r2_show    = pmax(r2, 0),
+        comp_label = factor(component, levels = vp_comp_cols, labels = vp_comp_labels)
+      ) %>%
+      ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
+      geom_col(position = "stack", alpha = 0.88, width = 0.7) +
+      geom_text(aes(label = ifelse(r2_show >= 0.3, sprintf("%.1f%%", r2_show), "")),
+                position = position_stack(vjust = 0.5),
+                size = 2.5, color = "white") +
+      scale_fill_manual(values = vp_comp_colors, name = "Fraction") +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+      labs(title = title_str, subtitle = subtitle_str,
+           x = NULL, y = "Adj. R² (%)") +
+      theme_cn() +
+      theme(legend.position = "right", axis.text.x = element_text(size = 8))
+  }
+
+  p_vp_rg <- make_vp_plot(
+    vp_rg_tbl,
+    "Variance Partitioning – M1b Full Control (Footprint 2D): Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9)\n",
+           "Mgmt = Investment + CGI; Local = Precipitation; ",
+           "Background = Population + Road Density + Building Footprint (2D)\n",
+           "Stacked fractions (negative shown as 0); shared fractions show collinear overlap")
+  )
 
   ggsave(file.path(OUT, "varpart_response_group.png"),
          p_vp_rg, width = 14, height = 5, dpi = 300)
   cat("-> varpart_response_group.png\n")
+
+  if (nrow(vp_rg_nonpop_tbl) > 0) {
+    p_vp_rg_vol <- make_vp_plot(
+      vp_rg_nonpop_tbl,
+      "Variance Partitioning – M1c Full Control (Volume 3D): Promote vs Inhibit",
+      paste0("Outcome: TRRI_g (within-group 1–9)\n",
+             "Mgmt = Investment + CGI; Local = Precipitation; ",
+             "Background = Population + Road Density + Building Volume Density (3D)\n",
+             "Stacked fractions (negative shown as 0); shared fractions show collinear overlap")
+    )
+    ggsave(file.path(OUT, "varpart_response_group_vol.png"),
+           p_vp_rg_vol, width = 14, height = 5, dpi = 300)
+    cat("-> varpart_response_group_vol.png\n")
+
+    # ── Combined: M1b (footprint) + M1c (volume) in one figure ───────────────
+    combined_vp_df <- bind_rows(
+      vp_rg_tbl       %>% mutate(model = "M1b: Full Control (Footprint 2D)"),
+      vp_rg_nonpop_tbl %>% mutate(model = "M1c: Full Control (Volume 3D)")
+    )
+    koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                    C = "C(温带)", D = "D(大陆)")
+    ko_all  <- intersect(c("ALL","A","B","C","D"), unique(combined_vp_df$koppen))
+    lvl_all <- as.vector(outer(koppen_nm2[ko_all], group_labels,
+                               function(k, g) paste0(k, "\n(", g, ")")))
+
+    p_vp_combined <- combined_vp_df %>%
+      mutate(
+        grp_label = factor(
+          paste0(koppen_nm2[koppen], "\n(", response_group, ")"), levels = lvl_all),
+        model = factor(model, levels = c("M1b: Full Control (Footprint 2D)",
+                                         "M1c: Full Control (Volume 3D)"))
+      ) %>%
+      filter(!is.na(grp_label)) %>%
+      pivot_longer(all_of(vp_comp_cols), names_to = "component", values_to = "r2") %>%
+      mutate(
+        r2_show    = pmax(r2, 0),
+        comp_label = factor(component, levels = vp_comp_cols, labels = vp_comp_labels)
+      ) %>%
+      ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
+      geom_col(position = "stack", alpha = 0.88, width = 0.7) +
+      geom_text(aes(label = ifelse(r2_show >= 0.5, sprintf("%.1f%%", r2_show), "")),
+                position = position_stack(vjust = 0.5),
+                size = 2.3, color = "white") +
+      scale_fill_manual(values = vp_comp_colors, name = "Fraction") +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+      facet_wrap(~model, ncol = 1) +
+      labs(
+        title    = "Variance Partitioning: M1b vs M1c (All Fractions incl. Shared)",
+        subtitle = paste0(
+          "Outcome: TRRI_g (within-group 1–9)\n",
+          "Mgmt = Investment + CGI; Local = Precipitation\n",
+          "Background (M1b) = Population + Road + Building Footprint (2D)\n",
+          "Background (M1c) = Population + Road + Building Volume Density (3D)\n",
+          "Shared fractions reflect variance jointly explained by two or more variable groups"
+        ),
+        x = NULL, y = "Adj. R² (%)"
+      ) +
+      theme_cn() +
+      theme(legend.position = "right", axis.text.x = element_text(size = 8))
+
+    ggsave(file.path(OUT, "varpart_combined_models.png"),
+           p_vp_combined, width = 16, height = 10, dpi = 300)
+    cat("-> varpart_combined_models.png\n")
+  }
 }
 
+
+# =============================================================================
+# MX. 模型表现比较图（各OLR模型McFadden R² 对比）
+# =============================================================================
+
+cat("\n=== MX. 模型表现比较图 ===\n")
+
+model_perf_list <- list()
+
+# M1：Basic Model
+if (exists("olr_rg_tbl") && nrow(olr_rg_tbl) > 0) {
+  model_perf_list[["M1:\nBasic Model"]] <- olr_rg_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>%
+    distinct() %>%
+    mutate(model = "M1:\nBasic Model")
+}
+
+# M1b：Full Control (Footprint)
+if (exists("olr_rg_full_tbl") && nrow(olr_rg_full_tbl) > 0) {
+  model_perf_list[["M1b:\nFull Control\n(Footprint)"]] <- olr_rg_full_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>%
+    distinct() %>%
+    mutate(model = "M1b:\nFull Control\n(Footprint)")
+}
+
+# M1c：Full Control (Volume)
+if (exists("olr_rg_nopop_tbl") && nrow(olr_rg_nopop_tbl) > 0) {
+  model_perf_list[["M1c:\nFull Control\n(Volume)"]] <- olr_rg_nopop_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>%
+    distinct() %>%
+    mutate(model = "M1c:\nFull Control\n(Volume)")
+}
+
+if (length(model_perf_list) > 0) {
+  koppen_nm_mx <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                    C = "C(温带)", D = "D(大陆)")
+  model_levels <- names(model_perf_list)
+
+  perf_df <- bind_rows(model_perf_list) %>%
+    mutate(
+      model     = factor(model, levels = model_levels),
+      grp_label = factor(koppen_nm_mx[koppen],
+                         levels = koppen_nm_mx[intersect(c("ALL","A","B","C","D"), koppen)])
+    ) %>%
+    filter(!is.na(grp_label))
+
+  p_model_compare <- perf_df %>%
+    ggplot(aes(x = grp_label, y = mcfadden, color = model, group = model)) +
+    geom_line(linewidth = 0.7, alpha = 0.8) +
+    geom_point(size = 2.5) +
+    geom_text(aes(label = sprintf("%.3f", mcfadden)),
+              vjust = -0.7, size = 2.8, family = "heiti",
+              position = position_dodge(0.1)) +
+    scale_color_manual(
+      values = c("M1:\nBasic Model"           = "#4575B4",
+                 "M1b:\nFull Control\n(Footprint)" = "#D73027",
+                 "M1c:\nFull Control\n(Volume)"    = "#1A9641"),
+      name = "Model"
+    ) +
+    facet_wrap(~response_group, ncol = 2) +
+    labs(
+      title    = "OLR Model Comparison: McFadden Pseudo-R²",
+      subtitle = paste0(
+        "Outcome: TRRI_g (within-group 1–9)\n",
+        "M1 (Basic Model): Investment + CGI + Lon/Lat/Köppen\n",
+        "M1b (Full Control, Footprint): M1 + Precip + Pop + Road + Building Footprint (2D)\n",
+        "M1c (Full Control, Volume): M1 + Precip + Pop + Road + Building Volume Density (3D)"
+      ),
+      x = NULL, y = "McFadden Pseudo-R²"
+    ) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "model_compare_mcfadden.png"),
+         p_model_compare, width = 12, height = 6, dpi = 300)
+  cat("-> model_compare_mcfadden.png\n")
+
+  # 同时输出汇总表
+  perf_summary <- perf_df %>%
+    dplyr::select(model, response_group, koppen, n, mcfadden) %>%
+    arrange(model, response_group, koppen)
+  write_csv(perf_summary, file.path(OUT, "model_compare_mcfadden.csv"))
+  cat("-> model_compare_mcfadden.csv\n")
+  print(perf_summary)
+}
 
 # =============================================================================
 # 完成
