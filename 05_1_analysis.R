@@ -1773,6 +1773,19 @@ anal_df <- anal_df %>%
 
 group_labels <- c("促进", "抑制")
 
+# 导出站点级协变量表（供 15_hcsif 等新分析按 meteo_stat_id 复用，避免重算协变量）
+saveRDS(
+  anal_df %>%
+    dplyr::select(meteo_stat_id, city_name, longitude, latitude,
+                  koppen_class, koppen_group,
+                  pa_built_10y, cgi_score, precip_mean,
+                  soil_clay, soil_sand, pop_10y, road_density,
+                  building_footprint, mean_height, building_vol_density,
+                  pgdp_10y),
+  file.path(OUT, "station_covariates.rds")
+)
+cat("-> station_covariates.rds（站点级协变量，供新分析复用）\n")
+
 # M0. 原始数据关系图：投资/CGI vs TRRI_g（分促进/抑制组）
 plot_df_m0 <- anal_df %>%
   filter(!is.na(pa_built_10y_w), !is.na(cgi_score_w), !is.na(TRRI_g)) %>%
@@ -2361,6 +2374,743 @@ if (length(model_perf_list) > 0) {
   write_csv(perf_summary, file.path(OUT, "model_compare_mcfadden.csv"))
   cat("-> model_compare_mcfadden.csv\n")
   print(perf_summary)
+}
+
+# =============================================================================
+# MN. No-Geography Models（去掉经度纬度的版本）
+# =============================================================================
+
+cat("\n=== MN. No-Geography Models (without Lon/Lat) ===\n")
+
+# MN1_nogeo 控制变量
+m1ng_ctrl_all   <- c("cgi_score_w", "koppen_B", "koppen_C", "koppen_D")
+m1ng_ctrl_inner <- c("cgi_score_w")
+
+# MN1b_nogeo 控制变量
+allng_ctrl_all   <- c("cgi_score_w", "precip_mean_w",
+                      "pop_10y_w", "road_density_w", "building_footprint_w",
+                      "koppen_B", "koppen_C", "koppen_D")
+allng_ctrl_inner <- c("cgi_score_w", "precip_mean_w",
+                      "pop_10y_w", "road_density_w", "building_footprint_w")
+
+# MN1c_nogeo 控制变量
+volng_ctrl_all   <- c("cgi_score_w", "precip_mean_w",
+                      "pop_10y_w", "road_density_w", "building_vol_density_w",
+                      "koppen_B", "koppen_C", "koppen_D")
+volng_ctrl_inner <- c("cgi_score_w", "precip_mean_w",
+                      "pop_10y_w", "road_density_w", "building_vol_density_w")
+
+# ── MN1. OLR (Basic, No Geo) ─────────────────────────────────────────────────
+olr_rg_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") m1ng_ctrl_all else m1ng_ctrl_inner
+    result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── MN1b. OLR (Full Control Footprint, No Geo) ───────────────────────────────
+olr_rg_full_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") allng_ctrl_all else allng_ctrl_inner
+    result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── MN1c. OLR (Full Control Volume, No Geo) ──────────────────────────────────
+olr_rg_vol_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") volng_ctrl_all else volng_ctrl_inner
+    result <- run_olr_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── Varpart: MN1b (Footprint, No Geo) ────────────────────────────────────────
+vp_rg_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    result <- run_vp3(df_g, "TRRI_g", mgmt_vars, local_vars, bg_vars, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── Varpart: MN1c (Volume, No Geo) ───────────────────────────────────────────
+vp_rg_vol_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    result <- run_vp3(df_g, "TRRI_g", mgmt_vars, local_vars, bg_vars_vol, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                C = "C(温带)", D = "D(大陆)")
+
+# Display vars for nogeo models
+m1ng_vars_display  <- c("inv_w", "cgi_score_w",
+                         "koppen_B", "koppen_C", "koppen_D")
+allng_vars_display <- c("inv_w", "cgi_score_w",
+                         "precip_mean_w",
+                         "pop_10y_w", "road_density_w", "building_footprint_w",
+                         "koppen_B", "koppen_C", "koppen_D")
+volng_vars_display <- c("inv_w", "cgi_score_w",
+                         "precip_mean_w",
+                         "pop_10y_w", "road_density_w", "building_vol_density_w",
+                         "koppen_B", "koppen_C", "koppen_D")
+
+# ── Forest plot: MN1 (Basic, No Geo) ─────────────────────────────────────────
+if (nrow(olr_rg_ng_tbl) > 0) {
+  write_csv(olr_rg_ng_tbl, file.path(OUT, "olr_response_group_nogeo_coef.csv"))
+  cat("-> olr_response_group_nogeo_coef.csv\n")
+
+  ng_plot_df      <- olr_rg_ng_tbl %>% filter(variable %in% m1ng_vars_display)
+  ng_koppen_order <- intersect(c("ALL","A","B","C","D"), unique(ng_plot_df$koppen))
+  ng_grp_levels   <- koppen_nm2[ng_koppen_order]
+
+  m1ng_var_label_map <- c(
+    inv_w       = "Investment",
+    cgi_score_w = "CGI Governance",
+    koppen_B    = "Köppen B (Arid)",
+    koppen_C    = "Köppen C (Temperate)",
+    koppen_D    = "Köppen D (Continental)"
+  )
+  m1ng_is_mgmt <- c(inv_w = TRUE, cgi_score_w = TRUE,
+                    koppen_B = FALSE, koppen_C = FALSE, koppen_D = FALSE)
+
+  p_olr_ng <- ng_plot_df %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen], levels = ng_grp_levels),
+      var_label2 = factor(m1ng_var_label_map[variable],
+                          levels = rev(m1ng_var_label_map[m1ng_vars_display])),
+      is_mgmt    = m1ng_is_mgmt[variable],
+      sig        = p_val < 0.05,
+      pt_shape   = case_when(
+        is_mgmt &  sig ~ 18L,
+        is_mgmt & !sig ~ 5L,
+       !is_mgmt &  sig ~ 16L,
+       !is_mgmt & !sig ~ 1L
+      )
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = coef, y = var_label2, color = response_group)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
+                   height = 0.3, linewidth = 0.6,
+                   position = position_dodge(0.6)) +
+    geom_point(aes(shape = pt_shape), size = 2.5,
+               position = position_dodge(0.6)) +
+    scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                       name = "Response") +
+    scale_shape_identity(guide = "none") +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = "MN1 Basic Model (No Geo): Promote vs Inhibit Groups",
+         subtitle = paste0("Outcome: TRRI_g (within-group 1–9, 1=worst, 9=best)\n",
+                           "Management: Investment, CGI (◆ filled=sig, ◇ open=ns)\n",
+                           "Controls: Köppen only — NO Lon/Lat (● filled=sig, ○ open=ns); error bars = 95% CI"),
+         x = "Coefficient (95% CI)", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "olr_response_group_nogeo.png"),
+         p_olr_ng, width = 14, height = 6, dpi = 300)
+  cat("-> olr_response_group_nogeo.png\n")
+}
+
+# ── Forest plot: MN1b (Footprint, No Geo) ────────────────────────────────────
+if (nrow(olr_rg_full_ng_tbl) > 0) {
+  write_csv(olr_rg_full_ng_tbl, file.path(OUT, "olr_response_group_fullvar_nogeo_coef.csv"))
+  cat("-> olr_response_group_fullvar_nogeo_coef.csv\n")
+
+  fullng_plot_df      <- olr_rg_full_ng_tbl %>% filter(variable %in% allng_vars_display)
+  fullng_koppen_order <- intersect(c("ALL","A","B","C","D"), unique(fullng_plot_df$koppen))
+  fullng_grp_levels   <- koppen_nm2[fullng_koppen_order]
+
+  p_forest_full_ng <- fullng_plot_df %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen], levels = fullng_grp_levels),
+      var_label2 = factor(var_label_map[variable],
+                          levels = rev(var_label_map[allng_vars_display])),
+      is_mgmt    = variable %in% mgmt_vars_display,
+      sig        = p_val < 0.05,
+      pt_shape   = case_when(
+        is_mgmt &  sig ~ 18L,
+        is_mgmt & !sig ~ 5L,
+       !is_mgmt &  sig ~ 16L,
+       !is_mgmt & !sig ~ 1L
+      )
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = coef, y = var_label2, color = response_group)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
+                   height = 0.3, linewidth = 0.6,
+                   position = position_dodge(0.6)) +
+    geom_point(aes(shape = pt_shape), size = 2.5,
+               position = position_dodge(0.6)) +
+    scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                       name = "Response") +
+    scale_shape_identity(guide = "none") +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = "MN1b Full Control Footprint (No Geo): Promote vs Inhibit Groups",
+         subtitle = paste0("Outcome: TRRI_g (within-group 1–9, 1=worst, 9=best)\n",
+                           "Management: Investment, CGI (◆ filled=sig, ◇ open=ns)\n",
+                           "Controls: Precip, Pop, Road, Footprint 2D, Köppen — NO Lon/Lat (● filled=sig, ○ open=ns); error bars = 95% CI"),
+         x = "Coefficient (95% CI)", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "olr_response_group_fullvar_nogeo.png"),
+         p_forest_full_ng, width = 14, height = 8, dpi = 300)
+  cat("-> olr_response_group_fullvar_nogeo.png\n")
+}
+
+# ── Forest plot: MN1c (Volume, No Geo) ───────────────────────────────────────
+if (nrow(olr_rg_vol_ng_tbl) > 0) {
+  write_csv(olr_rg_vol_ng_tbl, file.path(OUT, "olr_response_group_vol_nogeo_coef.csv"))
+  cat("-> olr_response_group_vol_nogeo_coef.csv\n")
+
+  volng_plot_df      <- olr_rg_vol_ng_tbl %>% filter(variable %in% volng_vars_display)
+  volng_koppen_order <- intersect(c("ALL","A","B","C","D"), unique(volng_plot_df$koppen))
+  volng_grp_levels   <- koppen_nm2[volng_koppen_order]
+
+  p_forest_vol_ng <- volng_plot_df %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen], levels = volng_grp_levels),
+      var_label2 = factor(var_label_map[variable],
+                          levels = rev(var_label_map[volng_vars_display])),
+      is_mgmt    = variable %in% mgmt_vars_display,
+      sig        = p_val < 0.05,
+      pt_shape   = case_when(
+        is_mgmt &  sig ~ 18L,
+        is_mgmt & !sig ~ 5L,
+       !is_mgmt &  sig ~ 16L,
+       !is_mgmt & !sig ~ 1L
+      )
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = coef, y = var_label2, color = response_group)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_errorbarh(aes(xmin = coef - 1.96*se, xmax = coef + 1.96*se),
+                   height = 0.3, linewidth = 0.6,
+                   position = position_dodge(0.6)) +
+    geom_point(aes(shape = pt_shape), size = 2.5,
+               position = position_dodge(0.6)) +
+    scale_color_manual(values = c("促进" = "#E6550D", "抑制" = "#3182BD"),
+                       name = "Response") +
+    scale_shape_identity(guide = "none") +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = "MN1c Full Control Volume (No Geo): Promote vs Inhibit Groups",
+         subtitle = paste0("Outcome: TRRI_g (within-group 1–9, 1=worst, 9=best)\n",
+                           "Management: Investment, CGI (◆ filled=sig, ◇ open=ns)\n",
+                           "Controls: Precip, Pop, Road, Vol.Density 3D, Köppen — NO Lon/Lat (● filled=sig, ○ open=ns); error bars = 95% CI"),
+         x = "Coefficient (95% CI)", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "olr_response_group_vol_nogeo.png"),
+         p_forest_vol_ng, width = 14, height = 8, dpi = 300)
+  cat("-> olr_response_group_vol_nogeo.png\n")
+}
+
+# ── Varpart plots: nogeo combined ────────────────────────────────────────────
+if (nrow(vp_rg_ng_tbl) > 0 && nrow(vp_rg_vol_ng_tbl) > 0) {
+  write_csv(vp_rg_ng_tbl,     file.path(OUT, "varpart_response_group_nogeo.csv"))
+  write_csv(vp_rg_vol_ng_tbl, file.path(OUT, "varpart_response_group_vol_nogeo.csv"))
+
+  p_vp_ng     <- make_vp_plot(
+    vp_rg_ng_tbl,
+    "Variance Partitioning – MN1b Full Control Footprint (No Geo): Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9)\n",
+           "Mgmt = Investment + CGI; Local = Precipitation; ",
+           "Background = Population + Road Density + Building Footprint (2D)\n",
+           "No Lon/Lat control; stacked fractions (negative shown as 0)")
+  )
+  p_vp_vol_ng <- make_vp_plot(
+    vp_rg_vol_ng_tbl,
+    "Variance Partitioning – MN1c Full Control Volume (No Geo): Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9)\n",
+           "Mgmt = Investment + CGI; Local = Precipitation; ",
+           "Background = Population + Road Density + Building Volume Density (3D)\n",
+           "No Lon/Lat control; stacked fractions (negative shown as 0)")
+  )
+
+  # Combined nogeo varpart
+  combined_vp_ng_df <- bind_rows(
+    vp_rg_ng_tbl     %>% mutate(model = "MN1b: Full Control (Footprint 2D, No Geo)"),
+    vp_rg_vol_ng_tbl %>% mutate(model = "MN1c: Full Control (Volume 3D, No Geo)")
+  )
+  ko_ng  <- intersect(c("ALL","A","B","C","D"), unique(combined_vp_ng_df$koppen))
+  lvl_ng <- as.vector(outer(koppen_nm2[ko_ng], group_labels,
+                             function(k, g) paste0(k, "\n(", g, ")")))
+
+  p_vp_ng_combined <- combined_vp_ng_df %>%
+    mutate(
+      grp_label = factor(
+        paste0(koppen_nm2[koppen], "\n(", response_group, ")"), levels = lvl_ng),
+      model = factor(model, levels = c("MN1b: Full Control (Footprint 2D, No Geo)",
+                                       "MN1c: Full Control (Volume 3D, No Geo)"))
+    ) %>%
+    filter(!is.na(grp_label)) %>%
+    pivot_longer(all_of(vp_comp_cols), names_to = "component", values_to = "r2") %>%
+    mutate(
+      r2_show    = pmax(r2, 0),
+      comp_label = factor(component, levels = vp_comp_cols, labels = vp_comp_labels)
+    ) %>%
+    ggplot(aes(x = grp_label, y = r2_show, fill = comp_label)) +
+    geom_col(position = "stack", alpha = 0.88, width = 0.7) +
+    geom_text(aes(label = ifelse(r2_show >= 0.5, sprintf("%.1f%%", r2_show), "")),
+              position = position_stack(vjust = 0.5),
+              size = 2.3, color = "white") +
+    scale_fill_manual(values = vp_comp_colors, name = "Fraction") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    facet_wrap(~model, ncol = 1) +
+    labs(
+      title    = "Variance Partitioning: MN1b vs MN1c (No Geo, All Fractions incl. Shared)",
+      subtitle = paste0(
+        "Outcome: TRRI_g (within-group 1–9); NO Lon/Lat control\n",
+        "Mgmt = Investment + CGI; Local = Precipitation\n",
+        "Background (MN1b) = Population + Road + Building Footprint (2D)\n",
+        "Background (MN1c) = Population + Road + Building Volume Density (3D)\n",
+        "Shared fractions reflect variance jointly explained by two or more variable groups"
+      ),
+      x = NULL, y = "Adj. R² (%)"
+    ) +
+    theme_cn() +
+    theme(legend.position = "right", axis.text.x = element_text(size = 8))
+
+  ggsave(file.path(OUT, "varpart_nogeo_combined.png"),
+         p_vp_ng_combined, width = 16, height = 10, dpi = 300)
+  cat("-> varpart_nogeo_combined.png\n")
+}
+
+# ── McFadden comparison: all 6 models ────────────────────────────────────────
+model_perf_all_list <- list()
+
+if (exists("olr_rg_tbl") && nrow(olr_rg_tbl) > 0)
+  model_perf_all_list[["M1:\nBasic\n(Geo)"]] <- olr_rg_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>% distinct() %>%
+    mutate(model = "M1:\nBasic\n(Geo)")
+
+if (exists("olr_rg_ng_tbl") && nrow(olr_rg_ng_tbl) > 0)
+  model_perf_all_list[["MN1:\nBasic\n(No Geo)"]] <- olr_rg_ng_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>% distinct() %>%
+    mutate(model = "MN1:\nBasic\n(No Geo)")
+
+if (exists("olr_rg_full_tbl") && nrow(olr_rg_full_tbl) > 0)
+  model_perf_all_list[["M1b:\nFull Ctrl\nFootprint (Geo)"]] <- olr_rg_full_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>% distinct() %>%
+    mutate(model = "M1b:\nFull Ctrl\nFootprint (Geo)")
+
+if (exists("olr_rg_full_ng_tbl") && nrow(olr_rg_full_ng_tbl) > 0)
+  model_perf_all_list[["MN1b:\nFull Ctrl\nFootprint (No Geo)"]] <- olr_rg_full_ng_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>% distinct() %>%
+    mutate(model = "MN1b:\nFull Ctrl\nFootprint (No Geo)")
+
+if (exists("olr_rg_nopop_tbl") && nrow(olr_rg_nopop_tbl) > 0)
+  model_perf_all_list[["M1c:\nFull Ctrl\nVolume (Geo)"]] <- olr_rg_nopop_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>% distinct() %>%
+    mutate(model = "M1c:\nFull Ctrl\nVolume (Geo)")
+
+if (exists("olr_rg_vol_ng_tbl") && nrow(olr_rg_vol_ng_tbl) > 0)
+  model_perf_all_list[["MN1c:\nFull Ctrl\nVolume (No Geo)"]] <- olr_rg_vol_ng_tbl %>%
+    dplyr::select(response_group, koppen, n, mcfadden) %>% distinct() %>%
+    mutate(model = "MN1c:\nFull Ctrl\nVolume (No Geo)")
+
+if (length(model_perf_all_list) > 0) {
+  model_all_levels <- names(model_perf_all_list)
+  model_all_colors <- c(
+    "M1:\nBasic\n(Geo)"                  = "#4575B4",
+    "MN1:\nBasic\n(No Geo)"              = "#74ADD1",
+    "M1b:\nFull Ctrl\nFootprint (Geo)"   = "#D73027",
+    "MN1b:\nFull Ctrl\nFootprint (No Geo)" = "#F46D43",
+    "M1c:\nFull Ctrl\nVolume (Geo)"      = "#1A9641",
+    "MN1c:\nFull Ctrl\nVolume (No Geo)"  = "#74C476"
+  )
+
+  perf_all_df <- bind_rows(model_perf_all_list) %>%
+    mutate(
+      model     = factor(model, levels = model_all_levels),
+      grp_label = factor(koppen_nm2[koppen],
+                         levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)])
+    ) %>%
+    filter(!is.na(grp_label))
+
+  p_model_compare_all <- perf_all_df %>%
+    ggplot(aes(x = grp_label, y = mcfadden, color = model, group = model)) +
+    geom_line(linewidth = 0.7, alpha = 0.8) +
+    geom_point(size = 2.5) +
+    geom_text(aes(label = sprintf("%.3f", mcfadden)),
+              vjust = -0.7, size = 2.5, family = "heiti",
+              position = position_dodge(0.15)) +
+    scale_color_manual(values = model_all_colors, name = "Model") +
+    facet_wrap(~response_group, ncol = 2) +
+    labs(
+      title    = "OLR Model Comparison: McFadden Pseudo-R² (Geo vs No-Geo)",
+      subtitle = paste0(
+        "Outcome: TRRI_g (within-group 1–9)\n",
+        "Dark colors = with Lon/Lat; Light colors = without Lon/Lat\n",
+        "M1/MN1: Basic; M1b/MN1b: + Footprint; M1c/MN1c: + Volume Density"
+      ),
+      x = NULL, y = "McFadden Pseudo-R²"
+    ) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "model_compare_mcfadden_all.png"),
+         p_model_compare_all, width = 14, height = 6, dpi = 300)
+  cat("-> model_compare_mcfadden_all.png\n")
+
+  write_csv(perf_all_df %>%
+              dplyr::select(model, response_group, koppen, n, mcfadden) %>%
+              arrange(model, response_group, koppen),
+            file.path(OUT, "model_compare_mcfadden_all.csv"))
+  cat("-> model_compare_mcfadden_all.csv\n")
+}
+
+# =============================================================================
+# MR. 随机森林分析（补充有序Logit，非参数框架下验证各变量的预测力）
+# =============================================================================
+
+cat("\n=== MR. Random Forest Analysis ===\n")
+
+if (!requireNamespace("ranger", quietly = TRUE))
+  install.packages("ranger", repos = "https://cloud.r-project.org")
+library(ranger)
+
+# ── Helper: run RF for one df/variable set ────────────────────────────────────
+run_rf <- function(df, inv_var, ctrl_vars, grp_label, num_trees = 500) {
+  all_vars <- c(inv_var, ctrl_vars)
+  df2 <- df %>%
+    dplyr::select(TRRI_g, all_of(all_vars)) %>%
+    drop_na()
+  n <- nrow(df2)
+  if (n < 20) {
+    message(sprintf("  [RF skip] %s: n=%d < 20", grp_label, n))
+    return(NULL)
+  }
+  df2$TRRI_g <- as.numeric(df2$TRRI_g)
+  tryCatch({
+    fit <- ranger(
+      formula   = TRRI_g ~ .,
+      data      = df2,
+      num.trees = num_trees,
+      importance = "permutation",
+      seed      = 42
+    )
+    imp <- importance(fit)
+    # Direction via Spearman correlation
+    cors <- sapply(names(imp), function(v) {
+      cor(df2[[v]], df2$TRRI_g, method = "spearman", use = "complete.obs")
+    })
+    tibble(
+      koppen    = grp_label,
+      n         = n,
+      oob_r2    = fit$r.squared,
+      variable  = names(imp),
+      importance = as.numeric(imp),
+      direction  = sign(cors)
+    )
+  }, error = function(e) {
+    message(sprintf("  [RF error] %s: %s", grp_label, conditionMessage(e)))
+    NULL
+  })
+}
+
+run_rf_group <- function(df, inv_var, ctrl_vars, grp_label) {
+  df <- df %>% mutate(TRRI_g = TRRI_g)
+  run_rf(df, inv_var, ctrl_vars, grp_label)
+}
+
+# ── MR1. RF Basic Model ───────────────────────────────────────────────────────
+rf_rg_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") ctrl_all else ctrl_inner
+    result <- run_rf_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── MR1b. RF Full Control (Footprint) ────────────────────────────────────────
+rf_rg_full_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") all_vars_ctrl_all else all_vars_ctrl_inner
+    result <- run_rf_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── MR1c. RF Full Control (Volume) ───────────────────────────────────────────
+rf_rg_vol_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") vol_ctrl_all else vol_ctrl_inner
+    result <- run_rf_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── MR1_nogeo / MR1b_nogeo / MR1c_nogeo ──────────────────────────────────────
+rf_rg_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") m1ng_ctrl_all else m1ng_ctrl_inner
+    result <- run_rf_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+rf_rg_full_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") allng_ctrl_all else allng_ctrl_inner
+    result <- run_rf_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+rf_rg_vol_ng_tbl <- map_dfr(group_labels, function(rg) {
+  df_rg <- filter(anal_df, response_group == rg)
+  map_dfr(c("ALL", sort(unique(df_rg$koppen_group))), function(grp) {
+    df_g   <- if (grp == "ALL") df_rg else filter(df_rg, koppen_group == grp)
+    ctrl_v <- if (grp == "ALL") volng_ctrl_all else volng_ctrl_inner
+    result <- run_rf_group(df_g, "pa_built_10y_w", ctrl_v, grp)
+    if (!is.null(result)) result %>% mutate(response_group = rg, .before = 1)
+  })
+})
+
+# ── Helper: RF importance bar plot ───────────────────────────────────────────
+make_rf_plot <- function(rf_tbl, vars_display, title_str, subtitle_str,
+                          mgmt_vars = c("inv_w", "cgi_score_w"),
+                          label_map = var_label_map) {
+  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                  C = "C(温带)", D = "D(大陆)")
+
+  plot_df     <- rf_tbl %>% filter(variable %in% vars_display)
+  ko_order    <- intersect(c("ALL","A","B","C","D"), unique(plot_df$koppen))
+  grp_levels  <- koppen_nm2[ko_order]
+
+  plot_df %>%
+    mutate(
+      grp_label  = factor(koppen_nm2[koppen], levels = grp_levels),
+      var_label2 = factor(label_map[variable],
+                          levels = rev(label_map[vars_display])),
+      is_mgmt    = variable %in% mgmt_vars,
+      dir_label  = ifelse(direction >= 0, "Positive", "Negative"),
+      # importance can be negative (permutation); clip at 0 for display length,
+      # but keep value for color
+      imp_show   = importance,
+      pt_shape   = ifelse(is_mgmt, 18L, 16L)
+    ) %>%
+    filter(!is.na(grp_label), !is.na(var_label2)) %>%
+    ggplot(aes(x = imp_show, y = var_label2,
+               fill = interaction(dir_label, response_group),
+               alpha = is_mgmt)) +
+    geom_col(position = position_dodge(0.7), width = 0.6) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+    scale_fill_manual(
+      values = c(
+        "Positive.促进" = "#E6550D", "Negative.促进" = "#FDAE6B",
+        "Positive.抑制" = "#3182BD", "Negative.抑制" = "#9ECAE1"
+      ),
+      labels = c(
+        "Positive.促进" = "Promote (+)",
+        "Negative.促进" = "Promote (−)",
+        "Positive.抑制" = "Inhibit (+)",
+        "Negative.抑制" = "Inhibit (−)"
+      ),
+      name = "Group & Direction"
+    ) +
+    scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.65),
+                       guide = "none") +
+    facet_wrap(~grp_label, nrow = 1) +
+    labs(title    = title_str,
+         subtitle = subtitle_str,
+         x = "Permutation Importance (% ↑ MSE)", y = NULL) +
+    theme_cn() +
+    theme(legend.position = "right")
+}
+
+# ── Plots ─────────────────────────────────────────────────────────────────────
+# Extend var_label_map for M1 basic (which uses m1_var_label_map)
+rf_label_map <- c(
+  inv_w                  = "Investment",
+  cgi_score_w            = "CGI Governance",
+  precip_mean_w          = "Precipitation",
+  pop_10y_w              = "Population",
+  road_density_w         = "Road Density",
+  building_footprint_w   = "Building Footprint (2D)",
+  building_vol_density_w = "Building Volume Density (3D)",
+  longitude              = "Longitude",
+  latitude               = "Latitude",
+  koppen_B               = "Köppen B (Arid)",
+  koppen_C               = "Köppen C (Temperate)",
+  koppen_D               = "Köppen D (Continental)"
+)
+
+if (nrow(rf_rg_tbl) > 0) {
+  write_csv(rf_rg_tbl, file.path(OUT, "rf_response_group_coef.csv"))
+  p_rf1 <- make_rf_plot(
+    rf_rg_tbl, m1_vars_display,
+    "MR1 Basic Model (RF): Variable Importance – Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9)\n",
+           "Importance: permutation (% increase in OOB MSE); ",
+           "Direction: sign of Spearman correlation\n",
+           "Full bars = management variables; translucent = controls; color saturation = direction"),
+    label_map = rf_label_map
+  )
+  ggsave(file.path(OUT, "rf_response_group.png"),
+         p_rf1, width = 14, height = 6, dpi = 300)
+  cat("-> rf_response_group.png\n")
+}
+
+if (nrow(rf_rg_full_tbl) > 0) {
+  write_csv(rf_rg_full_tbl, file.path(OUT, "rf_response_group_fullvar_coef.csv"))
+  p_rf1b <- make_rf_plot(
+    rf_rg_full_tbl, all_vars_display,
+    "MR1b Full Control Footprint (RF): Variable Importance – Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9)\n",
+           "Importance: permutation (% increase in OOB MSE); ",
+           "Direction: sign of Spearman correlation\n",
+           "Full bars = management variables; translucent = controls"),
+    label_map = rf_label_map
+  )
+  ggsave(file.path(OUT, "rf_response_group_fullvar.png"),
+         p_rf1b, width = 14, height = 8, dpi = 300)
+  cat("-> rf_response_group_fullvar.png\n")
+}
+
+if (nrow(rf_rg_vol_tbl) > 0) {
+  write_csv(rf_rg_vol_tbl, file.path(OUT, "rf_response_group_vol_coef.csv"))
+  p_rf1c <- make_rf_plot(
+    rf_rg_vol_tbl, vol_vars_display,
+    "MR1c Full Control Volume (RF): Variable Importance – Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9)\n",
+           "Importance: permutation (% increase in OOB MSE); ",
+           "Direction: sign of Spearman correlation\n",
+           "Full bars = management variables; translucent = controls"),
+    label_map = rf_label_map
+  )
+  ggsave(file.path(OUT, "rf_response_group_vol.png"),
+         p_rf1c, width = 14, height = 8, dpi = 300)
+  cat("-> rf_response_group_vol.png\n")
+}
+
+if (nrow(rf_rg_ng_tbl) > 0) {
+  write_csv(rf_rg_ng_tbl, file.path(OUT, "rf_response_group_nogeo_coef.csv"))
+  p_rf_ng1 <- make_rf_plot(
+    rf_rg_ng_tbl, m1ng_vars_display,
+    "MR-N1 Basic Model No Geo (RF): Variable Importance – Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9); NO Lon/Lat\n",
+           "Importance: permutation (% increase in OOB MSE); Direction: sign of Spearman correlation"),
+    label_map = rf_label_map
+  )
+  ggsave(file.path(OUT, "rf_response_group_nogeo.png"),
+         p_rf_ng1, width = 14, height = 6, dpi = 300)
+  cat("-> rf_response_group_nogeo.png\n")
+}
+
+if (nrow(rf_rg_full_ng_tbl) > 0) {
+  write_csv(rf_rg_full_ng_tbl, file.path(OUT, "rf_response_group_fullvar_nogeo_coef.csv"))
+  p_rf_ng1b <- make_rf_plot(
+    rf_rg_full_ng_tbl, allng_vars_display,
+    "MR-N1b Full Footprint No Geo (RF): Variable Importance – Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9); NO Lon/Lat\n",
+           "Importance: permutation (% increase in OOB MSE); Direction: sign of Spearman correlation"),
+    label_map = rf_label_map
+  )
+  ggsave(file.path(OUT, "rf_response_group_fullvar_nogeo.png"),
+         p_rf_ng1b, width = 14, height = 8, dpi = 300)
+  cat("-> rf_response_group_fullvar_nogeo.png\n")
+}
+
+if (nrow(rf_rg_vol_ng_tbl) > 0) {
+  write_csv(rf_rg_vol_ng_tbl, file.path(OUT, "rf_response_group_vol_nogeo_coef.csv"))
+  p_rf_ng1c <- make_rf_plot(
+    rf_rg_vol_ng_tbl, volng_vars_display,
+    "MR-N1c Full Volume No Geo (RF): Variable Importance – Promote vs Inhibit",
+    paste0("Outcome: TRRI_g (within-group 1–9); NO Lon/Lat\n",
+           "Importance: permutation (% increase in OOB MSE); Direction: sign of Spearman correlation"),
+    label_map = rf_label_map
+  )
+  ggsave(file.path(OUT, "rf_response_group_vol_nogeo.png"),
+         p_rf_ng1c, width = 14, height = 8, dpi = 300)
+  cat("-> rf_response_group_vol_nogeo.png\n")
+}
+
+# ── OOB R² comparison across all RF models ───────────────────────────────────
+rf_all_perf <- bind_rows(
+  if (nrow(rf_rg_tbl)        > 0) rf_rg_tbl        %>% dplyr::select(response_group, koppen, n, oob_r2) %>% distinct() %>% mutate(model = "MR1:\nBasic (Geo)"),
+  if (nrow(rf_rg_ng_tbl)     > 0) rf_rg_ng_tbl     %>% dplyr::select(response_group, koppen, n, oob_r2) %>% distinct() %>% mutate(model = "MR-N1:\nBasic (No Geo)"),
+  if (nrow(rf_rg_full_tbl)   > 0) rf_rg_full_tbl   %>% dplyr::select(response_group, koppen, n, oob_r2) %>% distinct() %>% mutate(model = "MR1b:\nFootprint (Geo)"),
+  if (nrow(rf_rg_full_ng_tbl)> 0) rf_rg_full_ng_tbl%>% dplyr::select(response_group, koppen, n, oob_r2) %>% distinct() %>% mutate(model = "MR-N1b:\nFootprint (No Geo)"),
+  if (nrow(rf_rg_vol_tbl)    > 0) rf_rg_vol_tbl    %>% dplyr::select(response_group, koppen, n, oob_r2) %>% distinct() %>% mutate(model = "MR1c:\nVolume (Geo)"),
+  if (nrow(rf_rg_vol_ng_tbl) > 0) rf_rg_vol_ng_tbl %>% dplyr::select(response_group, koppen, n, oob_r2) %>% distinct() %>% mutate(model = "MR-N1c:\nVolume (No Geo)")
+)
+
+if (nrow(rf_all_perf) > 0) {
+  koppen_nm2 <- c(ALL = "全部", A = "A(热带)", B = "B(干旱)",
+                  C = "C(温带)", D = "D(大陆)")
+  rf_model_levels  <- unique(rf_all_perf$model)
+  rf_model_colors  <- c(
+    "MR1:\nBasic (Geo)"          = "#4575B4",
+    "MR-N1:\nBasic (No Geo)"     = "#74ADD1",
+    "MR1b:\nFootprint (Geo)"     = "#D73027",
+    "MR-N1b:\nFootprint (No Geo)"= "#F46D43",
+    "MR1c:\nVolume (Geo)"        = "#1A9641",
+    "MR-N1c:\nVolume (No Geo)"   = "#74C476"
+  )
+
+  p_rf_compare <- rf_all_perf %>%
+    mutate(
+      model     = factor(model, levels = rf_model_levels),
+      grp_label = factor(koppen_nm2[koppen],
+                         levels = koppen_nm2[intersect(c("ALL","A","B","C","D"), koppen)])
+    ) %>%
+    filter(!is.na(grp_label)) %>%
+    ggplot(aes(x = grp_label, y = oob_r2, color = model, group = model)) +
+    geom_line(linewidth = 0.7, alpha = 0.8) +
+    geom_point(size = 2.5) +
+    geom_text(aes(label = sprintf("%.3f", oob_r2)),
+              vjust = -0.7, size = 2.5, family = "heiti",
+              position = position_dodge(0.15)) +
+    scale_color_manual(values = rf_model_colors, name = "Model") +
+    facet_wrap(~response_group, ncol = 2) +
+    labs(
+      title    = "RF Model Comparison: OOB R² (Geo vs No-Geo)",
+      subtitle = paste0(
+        "Outcome: TRRI_g (within-group 1–9)\n",
+        "Dark = with Lon/Lat; Light = without Lon/Lat; ",
+        "OOB R² from ranger permutation forest (500 trees)"
+      ),
+      x = NULL, y = "OOB R²"
+    ) +
+    theme_cn() +
+    theme(legend.position = "right")
+
+  ggsave(file.path(OUT, "rf_model_compare_oobr2.png"),
+         p_rf_compare, width = 14, height = 6, dpi = 300)
+  cat("-> rf_model_compare_oobr2.png\n")
+
+  write_csv(rf_all_perf %>% arrange(model, response_group, koppen),
+            file.path(OUT, "rf_model_compare_oobr2.csv"))
+  cat("-> rf_model_compare_oobr2.csv\n")
 }
 
 # =============================================================================
