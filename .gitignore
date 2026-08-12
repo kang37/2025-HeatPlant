@@ -9,3 +9,6 @@ file/
 note/
 _targets/
 .DS_Store
+.claude/
+Rplots.pdf
+*.log
