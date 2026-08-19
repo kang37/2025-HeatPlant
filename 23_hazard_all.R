@@ -33,8 +33,11 @@ setwd(PROJ)
 OUT <- "data_proc/output_hcsif_buf1000"
 log_msg <- function(...) cat(..., "\n", sep = "")
 aa <- commandArgs(trailingOnly = TRUE)
-RULE <- if (length(aa) >= 2 && aa[1] == "--rule") aa[2] else "strict"
-log_msg("分类判据: ", RULE)
+RULE  <- if (any(aa == "--rule"))  aa[which(aa == "--rule")  + 1] else "strict"
+# --maxtp: 只用 tp <= 该值的滞后。设为 7 可去掉末步——判据在最后一步无法
+# 检验持续性(剩余步数为1), 截断后每个判定点都至少有一步可供核对。
+MAXTP <- if (any(aa == "--maxtp")) as.integer(aa[which(aa == "--maxtp") + 1]) else 8L
+log_msg("分类判据: ", RULE, " | 最大滞后: ", MAXTP)
 
 # ---- 复用 22 号脚本的协变量装配(执行到 dt 建好为止) ----------------------
 env <- new.env()
@@ -48,6 +51,7 @@ log_msg("协变量 ", length(PRED), " 个: ", paste(PRED, collapse = ", "))
 
 # ---- 分类: 逐字复现原脚本的持续性翻转判据 --------------------------------
 cm <- fread("data_proc/ccm_hcsif_buf1000/ccm_hcsif_buf1000_vpd_20260727_1031.csv")
+cm <- cm[tp <= MAXTP]
 setorder(cm, meteo_stat, tp)
 N_TP <- length(unique(cm$tp))
 
@@ -165,10 +169,60 @@ fit_group <- function(g, label) {
                 sig = fifelse(p_clust < .05, "*", ""))])
   log_msg("聚类后仍显著: ", tab[p_clust < .05, .N], " 个 | 若不聚类会有 ",
           tab[p_naive < .05, .N], " 个")
-  fwrite(tab, file.path(OUT, sprintf("hazard_%s_%s.csv", RULE, g)))
+  fwrite(tab, file.path(OUT, sprintf("hazard_%s_tp%d_%s.csv", RULE, MAXTP, g)))
   invisible(tab)
 }
 
 fit_group("inhibit_first", "抑制组 (全抑制 + 先抑制后促进) → 翻转为促进")
 fit_group("promote_first", "促进组 (全促进 + 先促进后抑制) → 翻转为抑制")
 log_msg("\n完成")
+
+# ===========================================================================
+# 分气候区回归
+#
+# 分层后每格样本很小(最小的 D 组促进方向只有 8 个事件), 18 个自变量放不下。
+# 改用跨三维度的 6 变量精简集, 并要求每自变量至少 5 个事件, 否则跳过该格。
+# 注意: 组内climate变量的取值范围被压缩, 其效应本就会衰减, 这是分层的固有代价。
+# ===========================================================================
+PRED_S <- c("imperv", "grass", "elev", "rsds_sd", "ntl", "urban_rate")
+MIN_EPV <- 5      # events per variable
+
+pp2 <- merge(pp, dt[, .(stat_id, koppen_group)], by = "stat_id")
+log_msg("\n\n##################### 分气候区 #####################")
+log_msg("精简自变量(", length(PRED_S), "): ", paste(PRED_S, collapse = ", "))
+
+res_all <- list()
+for (kg in sort(unique(na.omit(pp2$koppen_group)))) {
+  for (g in c("inhibit_first", "promote_first")) {
+    d <- pp2[koppen_group == kg & start_dir == g,
+             c("ev", "tp", "stat_id", PRED_S), with = FALSE]
+    d <- d[complete.cases(d)]
+    n_ev <- sum(d$ev); n_st <- uniqueN(d$stat_id)
+    lab <- sprintf("%s 区 | %s", kg, ifelse(g == "inhibit_first", "抑制组", "促进组"))
+    if (n_ev < MIN_EPV * length(PRED_S)) {
+      log_msg(sprintf("\n[跳过] %s: 站 %d, 事件 %d (每自变量仅 %.1f, 低于 %d)",
+                      lab, n_st, n_ev, n_ev / length(PRED_S), MIN_EPV)); next
+    }
+    for (v in PRED_S) set(d, j = v, value = as.numeric(scale(winz(as.numeric(d[[v]])))))
+    # 分层后 tp 的层数可能不全, 基线风险退化为线性以省自由度
+    f <- as.formula(paste("ev ~ tp +", paste(PRED_S, collapse = " + ")))
+    fit <- glm(f, data = d, family = binomial)
+    co <- summary(fit)$coefficients
+    cse <- cluster_se(fit, d$stat_id)
+    tab <- data.table(kg = kg, grp = g, var = rownames(co), coef = co[, 1],
+                      se = cse[rownames(co)])[var %in% PRED_S]
+    tab[, p := 2 * pnorm(-abs(coef / se))]
+    log_msg(sprintf("\n===== %s | 站 %d | 事件 %d | 每自变量 %.1f =====",
+                    lab, n_st, n_ev, n_ev / length(PRED_S)))
+    print(tab[order(p), .(var, coef = round(coef, 3), se = round(se, 3),
+                          p = signif(p, 3), sig = fifelse(p < .05, "*", ""))])
+    res_all[[paste(kg, g)]] <- tab
+  }
+}
+if (length(res_all)) {
+  out <- rbindlist(res_all)
+  fwrite(out, file.path(OUT, sprintf("hazard_%s_tp%d_bykoppen.csv", RULE, MAXTP)))
+  log_msg("\n-- 各气候区显著变量汇总 --")
+  print(dcast(out[p < .05], var ~ kg + grp, value.var = "coef",
+              fun.aggregate = function(x) round(x[1], 3), fill = NA))
+}
