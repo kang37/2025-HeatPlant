@@ -15,7 +15,7 @@
 # ---------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
-  library(data.table); library(ggplot2); library(showtext) })
+  library(data.table); library(ggplot2); library(showtext); library(grid) })
 Sys.setlocale("LC_ALL", "en_US.UTF-8")
 setwd("/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant")
 showtext_auto(); showtext_opts(dpi = 300)
@@ -72,16 +72,30 @@ for (g in c("inhibit_first", "promote_first")) {
 }
 r <- rbindlist(res)
 ZL <- c(全体 = "全体（不分区）", B = "B 干旱带", C = "C 温带季风", D = "D 温带大陆性")
-r[, `:=`(zone_cn = factor(ZL[zone], levels = rev(ZL)),
-         cn = factor(CN[var], levels = CN),
+
+
+
+# 未拟合的格补空行, 使面板照常出现并标注原因(否则读者会误以为漏画)
+cells <- CJ(zone = names(ZL), grp = c("inhibit_first", "promote_first"), unique = TRUE)
+have <- unique(r[, .(zone, grp)])
+miss <- cells[!have, on = .(zone, grp)]
+if (nrow(miss)) {
+  nz <- d0[complete.cases(d0[, c("score", S5), with = FALSE])][
+    , .N, by = .(zone = koppen_group, grp = start_dir)]
+  miss <- merge(miss, nz, by = c("zone", "grp"), all.x = TRUE)
+  miss[is.na(N), N := 0L]
+  r <- rbind(r, miss[, .(zone, grp, var = S5[1], beta = NA_real_, se = NA_real_,
+                         p = NA_real_, n = N, obs_per_var = NA_real_, eff_n = NA_real_,
+                         r2 = NA_real_)], fill = TRUE)
+}
+r[, `:=`(zone_cn = factor(ZL[zone], levels = ZL),
+         cn = factor(CN[var], levels = rev(CN)),
          grp_cn = factor(fifelse(grp == "inhibit_first",
                                  "抑制组：得分高 = 越早脱离抑制",
                                  "促进组：得分高 = 促进维持越久"),
                 levels = c("抑制组：得分高 = 越早脱离抑制", "促进组：得分高 = 促进维持越久")),
          lo = beta - 1.96 * se, hi = beta + 1.96 * se,
-         small = obs_per_var < 10)]
-r[, sig := p < .05]
-
+         small = obs_per_var < 10, sig = p < .05)]
 log_msg("=== 各格拟合概况 ===")
 print(unique(r[, .(气候区 = zone, 组 = fifelse(grp == "inhibit_first", "抑制", "促进"),
                    n, 每自变量 = round(obs_per_var, 1), 有效独立样本 = round(eff_n, 1),
@@ -92,31 +106,37 @@ print(r[sig == TRUE][order(grp_cn, cn), .(组 = grp_cn, 气候区 = zone, 变量
         p = signif(p, 3), 样本偏小 = fifelse(small, "是", ""))])
 fwrite(r, file.path(OUT, sprintf("zone_conley%d_tp%d.csv", CUT, M)))
 
+lab <- unique(r[!is.na(beta), .(zone_cn, grp_cn,
+                 txt = sprintf("n = %d，R² = %.2f%s", n, r2,
+                               fifelse(small, "，样本偏小", "")))])
+gap <- unique(r[is.na(beta), .(zone_cn, grp_cn, txt = sprintf("样本不足（n = %d）", n))])
+
 PAL <- c("全体（不分区）" = "#3A3A3A", "B 干旱带" = "#C2703A",
          "C 温带季风" = "#2E7D74", "D 温带大陆性" = "#4B6BA8")
-p <- ggplot(r, aes(beta, zone_cn, colour = zone_cn)) +
+p <- ggplot(r[!is.na(beta)], aes(beta, cn, colour = zone_cn)) +
   geom_vline(xintercept = 0, colour = "grey60", linewidth = .35) +
-  geom_errorbar(aes(xmin = lo, xmax = hi), orientation = "y", width = 0, linewidth = .65) +
-  geom_point(aes(shape = sig, fill = zone_cn, size = small), stroke = .7) +
-  facet_grid(cn ~ grp_cn, switch = "y") +
+  geom_errorbar(aes(xmin = lo, xmax = hi), orientation = "y", width = 0, linewidth = .7) +
+  geom_point(aes(shape = sig, fill = zone_cn, size = small), stroke = .75) +
+  geom_text(data = lab, aes(x = -Inf, y = Inf, label = txt), inherit.aes = FALSE,
+            hjust = -0.06, vjust = 1.5, size = 2.9, colour = "grey40") +
+  geom_text(data = gap, aes(x = 0, y = 3, label = txt), inherit.aes = FALSE,
+            size = 3.2, colour = "grey55") +
+  facet_grid(grp_cn ~ zone_cn) +
   scale_shape_manual(values = c(`TRUE` = 21, `FALSE` = 1), guide = "none") +
-  scale_size_manual(values = c(`TRUE` = 1.7, `FALSE` = 2.6), guide = "none") +
-  scale_colour_manual(values = PAL, name = NULL) +
+  scale_size_manual(values = c(`TRUE` = 1.7, `FALSE` = 2.5), guide = "none") +
+  scale_colour_manual(values = PAL, guide = "none") +
   scale_fill_manual(values = PAL, guide = "none") +
-  guides(colour = guide_legend(nrow = 1, reverse = TRUE)) +
   labs(title = "分气候区的转变时间得分回归",
-       subtitle = paste0("OLS 系数 + Conley 空间 HAC 95% 置信区间（截断 200 km）；",
-                         "5 变量精简集\n",
+       subtitle = paste0("OLS 系数 + Conley 空间 HAC 95% 置信区间（截断 200 km）；5 变量精简集\n",
                          "实心 = p<0.05；小点 = 每自变量观测数 < 10，结果需折扣"),
        x = "标准化回归系数", y = NULL) +
   theme_minimal(base_size = 10.5) +
   theme(panel.grid.major.y = element_line(colour = "grey94", linewidth = .3),
         panel.grid.minor = element_blank(),
-        strip.text.x = element_text(face = "bold", size = 10, hjust = 0),
-        strip.text.y.left = element_text(face = "bold", size = 10, angle = 0, hjust = 1),
-        strip.placement = "outside",
-        legend.position = "top", axis.text.y = element_blank(),
+        panel.spacing.x = unit(.9, "lines"),
+        strip.text.x = element_text(face = "bold", size = 10.5),
+        strip.text.y = element_text(face = "bold", size = 9.5, angle = 0, hjust = 0),
         plot.title = element_text(face = "bold", size = 13),
         plot.subtitle = element_text(colour = "grey35", size = 9, lineheight = 1.2))
-ggsave(file.path(OUT, "fig_zone_forest.png"), p, width = 9.6, height = 9, dpi = 300)
+ggsave(file.path(OUT, "fig_zone_forest.png"), p, width = 12.5, height = 6.2, dpi = 300)
 log_msg("\n已输出 fig_zone_forest.png")
