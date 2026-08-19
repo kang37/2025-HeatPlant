@@ -43,7 +43,7 @@ build <- function(M) {
   invisible(capture.output(eval(parse(text = paste(src, collapse = "\n")), envir = env)))
   pat <- env$pat
   pat[, score := fifelse(start_dir == "inhibit_first",
-                         fifelse(event == 1, (M + 1) - event_tp, 1),
+                         fifelse(event == 1, (M + 2) - event_tp, 1),
                          fifelse(event == 1, as.numeric(event_tp), M + 1))]
   merge(pat[, .(stat_id, start_dir, score)],
         env$dt[, c("stat_id", PRED), with = FALSE], by = "stat_id")
