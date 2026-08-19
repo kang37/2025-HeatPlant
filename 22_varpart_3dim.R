@@ -33,13 +33,20 @@ st <- fread("data_raw/hcsif/stations_924.csv"); setnames(st, "meteo_stat", "stat
 # ===== 2. 维度一: 土地利用与空间结构 ======================================
 g <- fread("data_raw/covariates_1km/glc_station_2020.csv")
 L <- function(...) rowSums(as.matrix(g[, sprintf("LC%02d", c(...)), with = FALSE]))
+# "树种"必须拆成互斥类才能进同一个回归。
+# 早先同时放入 forest / needleleaf / broadleaf / evergreen 构成恒等式
+#   forest == needleleaf + broadleaf + mixedleaf  (误差 5.6e-17)
+# 且 mixedleaf 近乎恒为 0, 于是 forest ~ needleleaf + broadleaf 近乎完全共线,
+# VIF 达 2.7e4, 森林相关系数的标准误被放大数个量级、不可解释。
+# 改为"叶型 x 物候"的 5 个互斥组合, 加总即森林总量, 信息不丢而共线消除。
 d1 <- data.table(
   stat_id = g$stat_id,
-  imperv     = g$LC23,                      # 不透水面(GLC_FCS30D)
-  forest     = L(4:13), grass = L(17), crop = L(0:3), water = L(27),
-  # "树种": 森林按叶型/物候拆分, 均以缓冲区面积为分母(避免无林站点除零)
-  needleleaf = L(8:11), broadleaf = L(4:7), mixedleaf = L(12:13),
-  evergreen  = L(4, 5, 8, 9), deciduous = L(6, 7, 10, 11))
+  imperv      = g$LC23,                     # 不透水面(GLC_FCS30D)
+  grass       = L(17), crop = L(0:3), water = L(27),
+  ever_needle = L(8, 9),    deci_needle = L(10, 11),
+  ever_broad  = L(4, 5),    deci_broad  = L(6, 7),
+  mixedleaf   = L(12:13),
+  forest      = L(4:13))                    # 仅作描述与核对, 不进回归
 
 ws <- fread("data_raw/WS土地利用比例_1000m.csv", encoding = "UTF-8")
 setnames(ws, names(ws), sub("^﻿", "", names(ws)))
@@ -111,9 +118,9 @@ dt <- Reduce(function(a, b) merge(a, b, by = "stat_id", all.x = TRUE),
 log_msg("总表: ", nrow(dt), " 站\n")
 
 # ===== 6. 覆盖率 ==========================================================
-VARS <- c("imperv","imperv_ws","forest","grass","crop","water","needleleaf","broadleaf",
-          "mixedleaf","evergreen","deciduous","road_density","building_footprint",
-          "mean_height","building_vol_density",
+VARS <- c("imperv","imperv_ws","forest","grass","crop","water",
+          "ever_needle","deci_needle","ever_broad","deci_broad","mixedleaf",
+          "road_density","building_footprint","mean_height","building_vol_density",
           "tavg","rh","cloud","precip","rsds_mean","rsds_sd","elev",
           "ntl","invest","urban_rate")
 cov_tab <- data.table(var = VARS,
@@ -126,8 +133,13 @@ fwrite(cov_tab, file.path(OUT, "varpart3_coverage.csv"))
 stopifnot(!any(duplicated(dt$stat_id)))
 
 DIM <- list(
-  landuse = c("imperv","forest","grass","crop","water","needleleaf","broadleaf",
-              "evergreen","road_density","building_footprint","mean_height"),
+  # 地表覆盖是成分数据: 9 类占比合计中位数 0.996, 近乎闭合。
+  # 全部入模会让 imperv 的 VIF 达 26.7, 且系数随参照类改变而变号
+  # (imperv 从 +0.0275* 翻到 -0.0060 ns), 不可解释。
+  # 故以耕地为参照类剔除, 其余系数读作"该地类替代耕地的效应", maxVIF 降到 5.7。
+  landuse = c("imperv","grass","water",
+              "ever_needle","deci_needle","ever_broad","deci_broad","mixedleaf",
+              "road_density","building_footprint","mean_height"),
   climate = c("tavg","rh","cloud","precip","rsds_mean","rsds_sd","elev"),
   socioec = c("ntl","invest","urban_rate"))
 CORE <- lapply(DIM, function(v) v[sapply(v, function(x) mean(!is.na(dt[[x]])) >= .90)])
@@ -140,6 +152,9 @@ run <- function(blocks, yv, tag) {
   for (v in vars) set(d, j = v, value = winz(as.numeric(d[[v]])))
   f <- as.formula(paste(yv, "~", paste(vars, collapse = "+")))
   R2 <- summary(lm(f, d))$r.squared
+  vif <- sapply(vars, function(v) {
+    r2 <- summary(lm(as.formula(paste(v, "~", paste(setdiff(vars, v), collapse="+"))), d))$r.squared
+    1 / (1 - r2) })
   vp <- rbindlist(lapply(names(blocks), function(b) {
     rest <- setdiff(vars, blocks[[b]])
     r2w <- if (!length(rest)) 0 else summary(lm(as.formula(paste(yv,"~",paste(rest,collapse="+"))), d))$r.squared
@@ -156,6 +171,8 @@ run <- function(blocks, yv, tag) {
 
   log_msg("\n============ ", tag, " | ", yv, " | n=", nrow(d), " ============")
   log_msg("线性 R2 = ", round(R2,4), " | 随机森林 R2 = ", round(rf$r.squared,4))
+  log_msg("最大 VIF = ", round(max(vif),1), " (", names(which.max(vif)), ")",
+          if (max(vif) > 10) "  <<< 共线警告" else "  [<10, 可解释]")
   log_msg("-- 三维度方差分解 --")
   print(vp[order(-uniq)][, .(dim, uniq = round(uniq,4), alone = round(alone,4))])
   log_msg("独占之和 ", round(sum(vp$uniq),4), " | 总 R2 ", round(R2,4),
