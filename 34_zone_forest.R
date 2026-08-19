@@ -19,7 +19,7 @@ suppressPackageStartupMessages({
 Sys.setlocale("LC_ALL", "en_US.UTF-8")
 setwd("/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant")
 showtext_auto(); showtext_opts(dpi = 300)
-OUT <- "data_proc/output_hcsif_buf1000"; M <- 8L; CUT <- 200; MIN_N <- 25
+OUT <- "data_proc/output_hcsif_buf1000"; M <- 8L; CUT <- 200; MIN_N <- 25   # 该格站数下限
 log_msg <- function(...) cat(..., "\n", sep = "")
 
 env <- new.env(); L <- readLines("23_hazard_all.R")
@@ -36,9 +36,17 @@ d0 <- merge(merge(pat[, .(stat_id, start_dir, score)],
                   dt[, c("stat_id", "koppen_group", PRED), with = FALSE], by = "stat_id"),
             st[, .(stat_id, longitude, latitude)], by = "stat_id")
 
-S5 <- c("imperv", "grass", "elev", "ntl", "urban_rate")
-CN <- c(imperv = "不透水面", grass = "草地", elev = "海拔",
-        ntl = "夜间灯光", urban_rate = "城镇化率")
+# 与全体模型完全相同的 18 变量集。分区后每自变量观测数降至 3.5-4.9,
+# 远低于常用的 10 的经验下限, 估计不稳、区间偏宽, 结果须据此折扣。
+# 但保持设定一致才能与全体模型直接对照, 且 5 变量集经检验存在遗漏变量偏误
+# (C 区抑制组 urban_rate 由 p=0.47 变为 p=0.0008)。
+S5 <- PRED
+CN <- c(imperv = "不透水面", grass = "草地", water = "水体",
+        ever_needle = "常绿针叶林", deci_needle = "落叶针叶林",
+        ever_broad = "常绿阔叶林", deci_broad = "落叶阔叶林", mixedleaf = "混交林",
+        tavg = "平均气温", rh = "相对湿度", cloud = "云量", precip = "降水量",
+        rsds_mean = "辐射均值", rsds_sd = "辐射年际变率", elev = "海拔",
+        ntl = "夜间灯光", invest = "绿地投资", urban_rate = "城镇化率")
 
 conley_se <- function(m, lon, lat, cut) {
   X <- model.matrix(m); u <- residuals(m); n <- nrow(X)
@@ -52,15 +60,17 @@ conley_se <- function(m, lon, lat, cut) {
 
 fit_cell <- function(d, zone, g) {
   d <- d[complete.cases(d[, c("score", S5), with = FALSE])]
-  if (nrow(d) < MIN_N || uniqueN(d$score) < 3) return(NULL)
-  z <- copy(d)[, c("score", S5), with = FALSE]
-  for (v in S5) set(z, j = v, value = as.numeric(scale(winz(as.numeric(z[[v]])))))
-  m <- lm(as.formula(paste("score ~", paste(S5, collapse = "+"))), z)
+  V <- S5[sapply(S5, function(v) sd(d[[v]], na.rm = TRUE) > 0)]   # 子集内无变异的列剔除
+  # 需留出足够残差自由度, 否则 Conley 的小样本校正 n/(n-k) 会爆掉
+  if (nrow(d) < MIN_N || uniqueN(d$score) < 3 || nrow(d) < length(V) + 10) return(NULL)
+  z <- copy(d)[, c("score", V), with = FALSE]
+  for (v in V) set(z, j = v, value = as.numeric(scale(winz(as.numeric(z[[v]])))))
+  m <- lm(as.formula(paste("score ~", paste(V, collapse = "+"))), z)
   cs <- conley_se(m, d$longitude, d$latitude, CUT)
-  b <- coef(m)[S5]; se <- cs$se[S5]
-  data.table(zone = zone, grp = g, var = S5, beta = b, se = se,
+  b <- coef(m)[V]; se <- cs$se[V]
+  data.table(zone = zone, grp = g, var = V, beta = b, se = se,
              p = 2 * pnorm(-abs(b / se)), n = nrow(d),
-             obs_per_var = nrow(d) / length(S5), eff_n = cs$eff_n,
+             obs_per_var = nrow(d) / length(V), eff_n = cs$eff_n,
              r2 = summary(m)$r.squared)
 }
 
@@ -111,24 +121,36 @@ lab <- unique(r[!is.na(beta), .(zone_cn, grp_cn,
                                fifelse(small, "，样本偏小", "")))])
 gap <- unique(r[is.na(beta), .(zone_cn, grp_cn, txt = sprintf("样本不足（n = %d）", n))])
 
+# B 区抑制组每自变量仅 2.1 个观测, 区间宽达 ±10, 会把其余面板压成一条线。
+# 故显示范围截到 ±3, 超界的区间末端画箭头示意, 数据本身不删。
+XL <- 3
+r[, `:=`(lo_c = pmax(lo, -XL), hi_c = pmin(hi, XL),
+         out_lo = lo < -XL, out_hi = hi > XL)]
+
 PAL <- c("全体（不分区）" = "#3A3A3A", "B 干旱带" = "#C2703A",
          "C 温带季风" = "#2E7D74", "D 温带大陆性" = "#4B6BA8")
 p <- ggplot(r[!is.na(beta)], aes(beta, cn, colour = zone_cn)) +
   geom_vline(xintercept = 0, colour = "grey60", linewidth = .35) +
-  geom_errorbar(aes(xmin = lo, xmax = hi), orientation = "y", width = 0, linewidth = .7) +
+  geom_errorbar(aes(xmin = lo_c, xmax = hi_c), orientation = "y", width = 0, linewidth = .7) +
+  geom_segment(data = r[out_hi == TRUE], aes(x = XL - .25, xend = XL, y = cn, yend = cn),
+               arrow = arrow(length = unit(.055, "in"), type = "closed"), linewidth = .5) +
+  geom_segment(data = r[out_lo == TRUE], aes(x = -XL + .25, xend = -XL, y = cn, yend = cn),
+               arrow = arrow(length = unit(.055, "in"), type = "closed"), linewidth = .5) +
   geom_point(aes(shape = sig, fill = zone_cn, size = small), stroke = .75) +
   geom_text(data = lab, aes(x = -Inf, y = Inf, label = txt), inherit.aes = FALSE,
             hjust = -0.06, vjust = 1.5, size = 2.9, colour = "grey40") +
   geom_text(data = gap, aes(x = 0, y = 3, label = txt), inherit.aes = FALSE,
             size = 3.2, colour = "grey55") +
   facet_grid(grp_cn ~ zone_cn) +
+  coord_cartesian(xlim = c(-XL, XL)) +
   scale_shape_manual(values = c(`TRUE` = 21, `FALSE` = 1), guide = "none") +
   scale_size_manual(values = c(`TRUE` = 1.7, `FALSE` = 2.5), guide = "none") +
   scale_colour_manual(values = PAL, guide = "none") +
   scale_fill_manual(values = PAL, guide = "none") +
   labs(title = "分气候区的转变时间得分回归",
-       subtitle = paste0("OLS 系数 + Conley 空间 HAC 95% 置信区间（截断 200 km）；5 变量精简集\n",
-                         "实心 = p<0.05；小点 = 每自变量观测数 < 10，结果需折扣"),
+       subtitle = paste0("OLS 系数 + Conley 空间 HAC 95% 置信区间（截断 200 km）\n",
+                         "与全体模型相同的 18 变量集；实心 = p<0.05；",
+                         "小点 = 每自变量观测数 < 10，结果需折扣；箭头 = 区间超出显示范围"),
        x = "标准化回归系数", y = NULL) +
   theme_minimal(base_size = 10.5) +
   theme(panel.grid.major.y = element_line(colour = "grey94", linewidth = .3),
@@ -138,5 +160,5 @@ p <- ggplot(r[!is.na(beta)], aes(beta, cn, colour = zone_cn)) +
         strip.text.y = element_text(face = "bold", size = 9.5, angle = 0, hjust = 0),
         plot.title = element_text(face = "bold", size = 13),
         plot.subtitle = element_text(colour = "grey35", size = 9, lineheight = 1.2))
-ggsave(file.path(OUT, "fig_zone_forest.png"), p, width = 12.5, height = 6.2, dpi = 300)
+ggsave(file.path(OUT, "fig_zone_forest.png"), p, width = 13, height = 11, dpi = 300)
 log_msg("\n已输出 fig_zone_forest.png")
