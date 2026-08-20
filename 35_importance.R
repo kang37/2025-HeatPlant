@@ -123,7 +123,7 @@ pl[, sig := paste(grp, cn) %in% paste(sigv$grp, sigv$cn)]
 p <- ggplot(pl, aes(pct, cn, fill = method)) +
   geom_col(width = .72) +
   geom_point(data = pl[sig == TRUE & method == "效应量 |β|"],
-             aes(x = -1.6), shape = 8, size = 1.3, colour = "grey25",
+             aes(x = -1.6, y = cn), shape = 8, size = 1.3, colour = "grey25",
              inherit.aes = FALSE, show.legend = FALSE) +
   facet_grid(grp_cn ~ method, scales = "free_y", space = "free_y") +
   scale_fill_manual(values = c("效应量 |β|" = "#8C6D3F",
