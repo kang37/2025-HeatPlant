@@ -9,7 +9,15 @@
 # 三个面板:
 #   A  全体站点 rho 的中位数与四分位区间
 #   B  按柯本气候带分组的 rho 中位数
-#   C  收敛性 trend 与"可信站点占比"(rho>0 且 trend>0)
+#
+# 原来还有一个 C 面板(收敛性 trend 中位数与"可信站点占比"), 已删除。
+# 理由是它不含独立信息: trend = cor(LibSize, rho) 与 rho 本身 Spearman 相关 0.897,
+# 而"trend 随 tp 下降"完全由"rho 随 tp 下降"带出来——
+#   naive   cor(trend, tp)        = -0.211
+#   partial cor(trend, tp | rho)  = +0.058
+# 在 rho 的每个五分位箱内, trend 的中位数横跨 tp=0..8 基本不动
+# (如 Q5 组 0.833 -> 0.822, Q3 组 0.537 -> 0.550)。
+# 既然条件在 rho 上以后 trend 不再随 tp 变, C 面板就只是 A 面板的重画。
 # ---------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -62,27 +70,12 @@ pB <- ggplot(b, aes(tp, med, colour = kg)) +
        subtitle = "各气候带 rho 中位数；干旱带在所有滞后上均高于季风区",
        x = "滞后 tp（每步 8 天）", y = expression(paste("中位 ", rho))) + th
 
-# --- C: 收敛性与可信占比 ---
-cm[, ok := rho > 0 & trend > 0]
-cc <- cm[, .(trend = median(trend, na.rm = TRUE),
-             frac = mean(ok, na.rm = TRUE)), by = tp][order(tp)]
-pC <- ggplot(cc, aes(tp)) +
-  geom_col(aes(y = frac), fill = "#B8C9C6", width = .62) +
-  geom_line(aes(y = trend), colour = "#C2703A", linewidth = .9) +
-  geom_point(aes(y = trend), colour = "#C2703A", size = 2.1) +
-  scale_x_continuous(breaks = 0:8) +
-  scale_y_continuous(name = "可信站点占比（柱）", limits = c(0, 1),
-                     sec.axis = sec_axis(~ ., name = "收敛趋势中位数（线）")) +
-  labs(title = "C  强度与收敛性同步衰减",
-       subtitle = "可信 = rho > 0 且收敛趋势 > 0；两者同降表明衰减非噪声累积",
-       x = "滞后 tp（每步 8 天）") + th
-
-p <- pA / pB / pC + plot_annotation(
+p <- pA / pB + plot_annotation(
   title = "VPD → SIF 因果强度随滞后的变化",
   subtitle = "HCSIF 1000 m 缓冲区，2000–2022 年 5–9 月，8 天合成",
   theme = theme(plot.title = element_text(face = "bold", size = 14),
                 plot.subtitle = element_text(colour = "grey35")))
-ggsave(file.path(OUT, "fig_rho_vs_tp.png"), p, width = 7.2, height = 10.5, dpi = 300)
+ggsave(file.path(OUT, "fig_rho_vs_tp.png"), p, width = 7.2, height = 7.4, dpi = 300)
 cat("已保存 fig_rho_vs_tp.png\n")
 print(a[, .(tp, rho中位 = round(med, 4), IQR = paste0(round(q25,3), "–", round(q75,3)))])
 print(dcast(b, tp ~ kg, value.var = "med")[, lapply(.SD, function(x) if(is.numeric(x)) round(x,4) else x)])
