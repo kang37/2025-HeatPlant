@@ -24,7 +24,7 @@ suppressPackageStartupMessages({
 PROJ     <- "/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant"
 RAW_DIR  <- file.path(PROJ, "data_raw/hcsif/tmp")
 STAT_DIR <- file.path(PROJ, "data_raw/hcsif/station_v2")
-BUFFER_M <- c(750, 1000)   # 每个半径生成一个 hcsif_grid_buf<r>.shp
+BUFFER_M <- c(750, 1000, 2000, 3000)   # 每个半径生成一个 hcsif_grid_buf<r>.shp
 
 # 实测自 2000196.tif / .tfw 的网格参数(EPSG:4326)
 # .tfw 给出左上角像元中心，栅格边界需再外扩半个像元。

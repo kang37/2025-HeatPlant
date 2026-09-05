@@ -38,7 +38,8 @@ DOY_MAX      <- 273     # 9 月 30 日
 # 缓冲区半径(m)，可给多个，每个生成一组 SIF_buf<r> / n_valid<r> 列。
 #   750  ≈ 3x3 个 500 m 像元
 #   1000 ≈ 5x5 个 500 m 像元(纬度越高经向像元越窄，实际个数随纬度变化)
-BUFFER_M     <- c(750, 1000)
+BUFFER_M     <- { .e <- Sys.getenv("HCSIF_BUFFER_M", "")
+                  if (nzchar(.e)) as.numeric(strsplit(.e, ",")[[1]]) else c(750, 1000, 2000, 3000) }
 VALID_RANGE  <- c(-1, 5)  # 物理合理的 SIF 区间(mW m-2 nm-1 sr-1)，超出即判为填充值
 
 # 关键: 栅格没有声明 NoData(NAflag = NaN)，但全图 68.8% 的像元恰好等于 0，
