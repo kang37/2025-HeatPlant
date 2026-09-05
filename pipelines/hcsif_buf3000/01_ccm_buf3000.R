@@ -29,7 +29,7 @@ suppressPackageStartupMessages({
 PROJ     <- "/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant"
 # 缓冲半径(m)：复制此脚本到 buf2000/buf3000 时，只需改这一行 BUF_R。
 # STAT_DIR / OUT_DIR / SIF 列名 全部由 BUF_R 派生，保证三套除半径外完全一致。
-BUF_R    <- as.integer(Sys.getenv("HCSIF_BUF_R", "1000"))
+BUF_R    <- as.integer(Sys.getenv("HCSIF_BUF_R", "3000"))
 STAT_DIR <- Sys.getenv("HCSIF_STAT_DIR", file.path(PROJ, "data_raw/hcsif/station_v3"))
 OUT_DIR  <- Sys.getenv("HCSIF_CCM_OUT",  file.path(PROJ, sprintf("data_proc/ccm_hcsif_buf%d", BUF_R)))
 SIF_COL  <- sprintf("SIF_buf%d", BUF_R)
@@ -38,14 +38,10 @@ METEO    <- file.path(PROJ, "data_raw/meteo_data_1961-2023")
 CACHE    <- file.path(PROJ, "data_raw/hcsif/vpd_8day_cache.rds")
 
 VPD_THRESHOLD <- 2.0     # kPa，与既有分析一致
-TP_SEQ        <- as.integer(Sys.getenv("HCSIF_TP_MIN","0")):as.integer(Sys.getenv("HCSIF_TP_MAX","8"))  # 滞后步数(每步8天),可用HCSIF_TP_MIN/MAX覆盖
+TP_SEQ        <- 0:8     # 滞后步数(每步 8 天)
 MIN_PTS       <- 40      # CCM 最少样本量
 MIN_DAYS_WIN  <- 5       # 一个 8 天窗口至少要有几天有效气象数据
 N_CORES       <- max(1L, parallel::detectCores() - 2L)
-# --- 预处理模式 ---
-# detrend  : 逐站对 idx8 线性去趋势(原做法)
-# normalize: 逐站归一化到单位方差(z-score，保留趋势与季节，Ushio et al. 2018 做法)
-PREPROC       <- Sys.getenv("HCSIF_PREPROC", "detrend")
 # --- 替代数据显著性检验(三套缓冲区必须一致) ---
 SEED_BASE     <- 20260824L      # 固定随机种子基准，三套一致、逐站可复现
 N_SURR        <- as.integer(Sys.getenv("HCSIF_N_SURR", "199"))  # 替代次数
@@ -138,21 +134,6 @@ safe_detrend <- function(x, t) {
   tryCatch(as.numeric(residuals(lm(x ~ t, na.action = na.exclude))),
            error = function(e) rep(NA_real_, length(x)))
 }
-# 归一化到单位方差(z-score)：保留趋势与季节，仅消除量纲/尺度差异(Ushio et al. 2018)
-znorm <- function(x) {
-  if (sum(!is.na(x)) < 3) return(rep(NA_real_, length(x)))
-  s <- sd(x, na.rm = TRUE); if (!is.finite(s) || s == 0) return(rep(NA_real_, length(x)))
-  (x - mean(x, na.rm = TRUE)) / s
-}
-preproc <- function(x, t) if (PREPROC == "normalize") znorm(x) else safe_detrend(x, t)
-# 去季节：按 DOY 减多年气候态得到距平，再标准化到单位方差(标准化距平)
-deseason <- function(x, doy) {
-  clim <- tapply(x, doy, mean, na.rm = TRUE)          # 每个DOY窗口的多年平均
-  a <- x - clim[as.character(doy)]                    # 距平
-  s <- sd(a, na.rm = TRUE)
-  if (!is.finite(s) || s == 0) return(rep(NA_real_, length(x)))
-  (a - mean(a, na.rm = TRUE)) / s
-}
 
 # 真实时间坐标: 以 8 天为单位的绝对序号。
 # 用它(而非行号)铺时间轴，才能让每年 10 月-次年 4 月的休眠期表现为真实的空档。
@@ -161,12 +142,8 @@ d[, idx8 := as.integer(round(as.numeric(
 
 # 去趋势用真实时间坐标，避免缺失把行号和实际间隔的对应关系拉偏
 for (v in c(SIF_COL, "vpd_mean")) {
-  if (PREPROC == "deseason")
-    d[, paste0(v, "_dt") := deseason(get(v), doy), by = meteo_stat]
-  else
-    d[, paste0(v, "_dt") := preproc(get(v), idx8), by = meteo_stat]
+  d[, paste0(v, "_dt") := safe_detrend(get(v), idx8), by = meteo_stat]
 }
-log_msg("预处理模式: ", PREPROC)
 
 # ===========================================================================
 # 4. CCM
@@ -276,21 +253,6 @@ run_ccm <- function(sid, y_col, x_col, tp_x) {
 }
 
 stations <- sort(unique(d$meteo_stat))
-
-# 排除疑似地表覆盖断点站(00_landcover_break_buf1000.R 产出，森林占比年际序列
-# 检出结构性跳变——多半是砍伐/开发/大规模种树，CCM 的单吸引子假设不成立)
-LC_BREAK_F <- file.path(OUT_DIR, "landcover_break_stations.csv")
-if (file.exists(LC_BREAK_F)) {
-  lcb <- fread(LC_BREAK_F)
-  excl <- lcb[has_break == TRUE]$stat_id
-  n0 <- length(stations)
-  stations <- setdiff(stations, excl)
-  log_msg("地表覆盖断点过滤: 候选 ", length(excl), " 站, 命中 ", n0 - length(stations),
-          " 站, 排除后剩 ", length(stations), " 站")
-} else {
-  log_msg("未找到 landcover_break_stations.csv，跳过地表覆盖断点过滤 (先跑 00_landcover_break_buf1000.R)")
-}
-
 if (!is.na(n_sample) && n_sample < length(stations)) {
   set.seed(42); stations <- sort(sample(stations, n_sample))
   log_msg("抽样试跑: ", length(stations), " 站")

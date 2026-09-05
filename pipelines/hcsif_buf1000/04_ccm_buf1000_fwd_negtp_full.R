@@ -77,6 +77,17 @@ for (v in c(SIF_COL, "vpd_mean")) d[, paste0(v, "_dt") := znorm(get(v)), by = me
 SIF_V <- paste0(SIF_COL, "_dt"); VPD_V <- "vpd_mean_dt"
 STATIONS <- sort(unique(d$meteo_stat))
 
+# 排除疑似地表覆盖断点站(同 01_ccm_buf1000.R；见 00_landcover_break_buf1000.R)
+LC_BREAK_F <- file.path(PROJ, "data_proc/output_hcsif_buf1000/landcover_break_stations.csv")
+if (file.exists(LC_BREAK_F)) {
+  lcb <- fread(LC_BREAK_F)
+  excl <- lcb[has_break == TRUE]$stat_id
+  n0 <- length(STATIONS)
+  STATIONS <- setdiff(STATIONS, excl)
+  log_msg("地表覆盖断点过滤: 候选 ", length(excl), " 站, 命中 ", n0 - length(STATIONS),
+          " 站, 排除后剩 ", length(STATIONS), " 站")
+}
+
 if (Sys.getenv("HCSIF_TEST", "0") == "1") {
   STATIONS <- head(STATIONS, 6)
   TP_SEQ   <- c(-2, 0, 2)
