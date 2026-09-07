@@ -2,14 +2,16 @@
 # ---------------------------------------------------------------------------
 # 06_smap_bivar_134.R
 #
-# 对"确认 VPD→SIF 方向"判据筛出的 134 站(见 docs/02_ccm.md)重新用二变量 S-map
-# 判断因果方向，修正 00_cross_module_issues.md #1 指出的单变量 S-map 偏差
-# (单变量只嵌入 VPD 自己，未把 SIF 自身状态纳入状态空间；smap_2var_vs_1var.R
-# 已验证二变量 [SIF,VPD] 与单变量符号一致率仅 63%)。
+# 对"CCM确认因果耦合"的站(2026-09-07起改用 12_ccm_causal_confirmation.R 统一
+# 判据的产出，不再是旧的134站独立判据；脚本名沿用历史命名，实际站数以
+# stations_confirmed.csv 为准)重新用二变量 S-map 判断因果方向，修正
+# 00_cross_module_issues.md #1 指出的单变量 S-map 偏差(单变量只嵌入 VPD 自己，
+# 未把 SIF 自身状态纳入状态空间；smap_2var_vs_1var.R 已验证二变量 [SIF,VPD]
+# 与单变量符号一致率仅 63%)。
 #
-# 站点范围 + optimal tp: 复用 04_ccm_buf1000_fwd_negtp_full.R 的输出
-# (fwd_negtp_full_20260904_1126.csv, fwd 方向 tp=-8..8 全量扫描)，按判据重新
-# 筛出 134 站——不重新跑 CCM。
+# 站点范围 + optimal tp: 直接读 12_ccm_causal_confirmation.R 的产出
+# (data_proc/ccm_hcsif_buf1000_causal_confirmed/stations_confirmed.csv)，
+# 不在本脚本里重复判据逻辑——判据改动只改12号脚本，这里自动跟着变。
 #
 # 方法: 状态空间 [SIF(t), VPD_lag(t)] (embedded=TRUE, E=2, theta=2 先固定，
 # 稳健性见 07_smap_robustness_theta_multivar.R)，在每站的 optimal tp 上算，
@@ -39,40 +41,13 @@ THETA        <- 2
 log_msg <- function(...) cat(format(Sys.time(), "[%H:%M:%S] "), ..., "\n", sep = "")
 
 # ===========================================================================
-# 1. 重建 134 站名单 + optimal tp (与 docs/02_ccm.md 判据一致，不重新跑 CCM)
+# 1. 站名单 + optimal tp: 直接读 12_ccm_causal_confirmation.R 的统一判据产出
 # ===========================================================================
-fwd <- fread("data_proc/ccm_hcsif_buf1000_fwd_negtp_full/fwd_negtp_full_20260904_1126.csv")
-
-# 排除疑似地表覆盖断点站(00_landcover_break_buf1000.R；森林占比年际序列检出
-# 结构性跳变，多半是砍伐/开发/大规模种树，CCM 单吸引子假设不成立)。
-# 站数因此可能不再是 134——下面按实际筛出数量走，不再硬编码。
-LC_BREAK_F <- file.path(PROJ, "data_proc/output_hcsif_buf1000/landcover_break_stations.csv")
-if (file.exists(LC_BREAK_F)) {
-  lcb  <- fread(LC_BREAK_F)
-  excl <- lcb[has_break == TRUE]$stat_id
-  n0   <- uniqueN(fwd$meteo_stat)
-  fwd  <- fwd[!meteo_stat %in% excl]
-  log_msg("地表覆盖断点过滤: 候选 ", length(excl), " 站, 命中 ", n0 - uniqueN(fwd$meteo_stat),
-          " 站, 剩 ", uniqueN(fwd$meteo_stat), " 站")
-}
-
-fwd[, sig := p_surr < 0.05 & (rho - rho_min) > 0]
-
-sigrows <- fwd[sig == TRUE]
-opt <- sigrows[order(meteo_stat, -rho)][, .SD[1], by = meteo_stat]
-pass2 <- opt[tp >= 0]
-setnames(pass2, c("tp", "rho", "E"), c("optimal_tp", "optimal_rho", "E_uni"))
-
-nsig_0to8 <- fwd[sig == TRUE & tp %in% 0:8, .(nsig_0to8 = .N), by = meteo_stat]
-nsig_all  <- fwd[sig == TRUE, .(nsig_all = .N, tp_sig_list = paste(sort(tp), collapse = ";")),
-                  by = meteo_stat]
-
-st134 <- pass2[, .(meteo_stat, optimal_tp, optimal_rho, E_uni)]
-st134 <- merge(st134, nsig_0to8, by = "meteo_stat", all.x = TRUE)
-st134 <- merge(st134, nsig_all, by = "meteo_stat", all.x = TRUE)
-st134[is.na(nsig_0to8), nsig_0to8 := 0L]
+CONFIRMED_F <- file.path(PROJ, "data_proc/ccm_hcsif_buf1000_causal_confirmed/stations_confirmed.csv")
+stopifnot(file.exists(CONFIRMED_F))
+st134 <- fread(CONFIRMED_F)[, .(meteo_stat, optimal_tp, optimal_rho, E_uni = E, nsig_0to8, nsig_all, tp_sig_list)]
 stopifnot(nrow(st134) > 0)
-log_msg("站名单重建完成(过滤地表覆盖断点后 n=", nrow(st134), "，脚本/文件名沿用原 134 命名)，",
+log_msg("读取统一因果确认站名单 n=", nrow(st134), "(脚本/文件名沿用历史 134 命名，实际站数以此为准)，",
         "optimal_tp 范围: ", min(st134$optimal_tp), "..", max(st134$optimal_tp))
 
 # ===========================================================================
@@ -142,7 +117,7 @@ direction_call <- function(cv, thresh = 0.75) {
   if (fp >= thresh) "Promote" else if (fp <= (1 - thresh)) "Inhibit" else "Ambiguous"
 }
 
-log_msg("开始逐站二变量 S-map, 134 站 x optimal tp ...")
+log_msg("开始逐站二变量 S-map, ", nrow(st134), " 站 x optimal tp ...")
 res <- rbindlist(lapply(seq_len(nrow(st134)), function(i) {
   r <- st134[i]
   out <- bivar_smap(r$meteo_stat, r$optimal_tp)
@@ -162,7 +137,7 @@ res <- rbindlist(lapply(seq_len(nrow(st134)), function(i) {
 st134 <- merge(st134, res, by = "meteo_stat", all.x = TRUE)
 setorder(st134, meteo_stat)
 
-log_msg("完成: ", st134[!is.na(direction_2v), .N], "/134 站算出二变量方向")
+log_msg("完成: ", st134[!is.na(direction_2v), .N], "/", nrow(st134), " 站算出二变量方向")
 print(st134[, .N, by = direction_2v])
 
 saveRDS(st134, file.path(OUT_DIR, "smap_bivar_134.rds"))

@@ -2,8 +2,9 @@
 # =============================================================================
 # recovery_vs_134_direction.R
 #   Schwalm 式事件-恢复构建(同 recovery_schwalm_style_demo.R 的方法), 限定在
-#   "确认 VPD->SIF 方向"134站支线(data_proc/smap_bivar_134/classify_134.csv,
-#   实际127站有完整字段)上, 用该支线自己的双变量S-map方向标签(direction_2v:
+#   CCM统一因果确认判据(12_ccm_causal_confirmation.R)筛出的站上
+#   (data_proc/smap_bivar_134/classify_134.csv, 脚本名沿用历史134命名, 实际
+#   站数以该文件为准), 用该支线自己的双变量S-map方向标签(direction_2v:
 #   Promote/Inhibit/Ambiguous)做分组生存分析。
 #   替代已删除的 recovery_vs_ccm_direction.R(那个用的是44-60的grp2, 单变量
 #   S-map、已知有偏, 见 docs/03_classification.md 2026-09-05 决定)。
@@ -15,7 +16,7 @@ suppressPackageStartupMessages({library(data.table); library(ggplot2); library(s
 PROJ <- "/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant"; setwd(PROJ)
 OUT  <- file.path(PROJ, "data_proc/output_loose_classify")
 
-# ---- 1. 134(实际127)站方向标签 --------------------------------------------
+# ---- 1. 站方向标签(站数以 classify_134.csv 实际行数为准) -------------------
 stn <- fread("data_proc/smap_bivar_134/classify_134.csv")[, .(meteo_stat, direction_2v, optimal_tp)]
 stn[, direction := factor(direction_2v, levels = c("Promote","Ambiguous","Inhibit"))]
 cat("=== 站点数(按 direction_2v) ===\n"); print(stn[, .N, by = direction])

@@ -14,7 +14,7 @@ R + data.table + ggplot2 + showtext。`data_raw/` 与 `data_proc/` 已 gitignore
 |---|---|---|
 | 一、数据获取与协变量装配 | 根目录 `13_*.R` ~ `22_*.R` | [docs/01_data_acquisition.md](docs/01_data_acquisition.md) |
 | 二、CCM 因果分析 + S-map | `pipelines/`（含 `hcsif_buf1000/`、`hcsif_buf2000/`、`hcsif_buf3000/`） | [docs/02_ccm.md](docs/02_ccm.md) |
-| 三、分类回归（抑制组/促进组驱动因素） | 根目录 `44_*.R` ~ `60_*.R` | [docs/03_classification.md](docs/03_classification.md) |
+| 三、因果确认标准 + 方向分类（原 44-60 driver 回归主线 2026-09-07 已删除） | `pipelines/hcsif_buf1000/12_ccm_causal_confirmation.R`（唯一CCM因果确认判据）+ `06/08_*_134.R`（方向分类）+ `pipelines/recovery_*.R`（恢复力交叉验证） | [docs/03_classification.md](docs/03_classification.md) |
 
 `note/` 目录是论文/报告稿（qmd/html/docx），不是进度文档，不要往里面写状态记录。
 

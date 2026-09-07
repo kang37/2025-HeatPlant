@@ -3,9 +3,9 @@
 # recovery_ar1_pure.R
 #   Forzieri et al. 2022 (Nature) 式"纯AR1"恢复力指标 vs De Keersmaecker 2015
 #   式 ARX phi(控制了VPD) 的对比。都在年内滞后(不跨冬歇期)、去季节z-score距平
-#   上估计，站点范围=CCM确认因果耦合站(ccm_hcsif_buf1000_surr, p_surr<.1且
-#   drho>0, 至少1个tp, tp=0..8) —— 不涉及promote/inhibit方向标签，不受
-#   grp2/134站方向不稳定问题影响。
+#   上估计，站点范围=统一CCM因果确认判据(pipelines/hcsif_buf1000/
+#   12_ccm_causal_confirmation.R 的产出) —— 不涉及promote/inhibit方向标签，
+#   不受方向不稳定问题影响。
 #     模型1(纯AR1, Forzieri式):   sif_anom(t) = phi1*sif_anom(t-1) + e
 #     模型2(ARX, De Keersmaecker式): sif_anom(t) = phi2*sif_anom(t-1) + beta*vpd_z(t) + e
 # =============================================================================
@@ -13,10 +13,8 @@ suppressPackageStartupMessages({library(data.table); library(ggplot2)})
 PROJ <- "/Users/Kang/Library/CloudStorage/Dropbox/RCloud/2025-HeatPlant"; setwd(PROJ)
 OUT  <- file.path(PROJ, "data_proc/output_loose_classify")
 
-# ---- 1. CCM 确认因果耦合的站点清单(与之前几轮一致的判据, 不涉及方向标签) ----
-b <- fread("data_proc/ccm_hcsif_buf1000_surr/ccm_hcsif_buf1000_vpd_20260824_1601.csv")
-b[, sig_loose := p_surr < 0.10 & (rho - rho_min) > 0]
-sel <- b[, .(any_loose = any(sig_loose)), by = meteo_stat][any_loose == TRUE, meteo_stat]
+# ---- 1. CCM 确认因果耦合的站点清单(统一判据, 不涉及方向标签) ----------------
+sel <- fread("data_proc/ccm_hcsif_buf1000_causal_confirmed/stations_confirmed.csv")$meteo_stat
 cat("CCM 确认因果耦合的站数:", length(sel), "\n")
 
 # ---- 2. HCSIF + VPD 距平构造(同前) -----------------------------------------
